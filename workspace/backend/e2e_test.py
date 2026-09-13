@@ -3,6 +3,7 @@ import json
 import urllib.request
 import urllib.parse
 import urllib.error
+from datetime import date, timedelta
 
 BASE = "http://127.0.0.1:8000/api"
 
@@ -150,6 +151,33 @@ rec2_again = [r for r in call("GET", f"/maintenance/records?elevator_id=3", toke
               if r["id"] == rec2["id"]][0]
 assert len(rec2_again["items"]) == snapshot_len and rec2_again["kind"] == "年度"
 print(f"3b) 周期切换存档 OK（年度 {snapshot_len} 项），历史快照不受模板调整影响")
+
+# 3c：完成季度保后，维保计划按季度顺延（不再固定 15 天）
+ev8 = call("GET", "/elevators/code/DT-2024008", token=WT)
+plan_before = next(p for p in call("GET", "/plans", token=WT) if p["elevator_id"] == ev8["id"])
+q_tpl = call("GET", f"/elevators/{ev8['id']}/checklist?cycle=季度", token=WT)["checklist"]
+r3 = call("POST", "/maintenance/check-in", {"elevator_code": "DT-2024008", "worker_id": 1}, token=WT)
+call("PUT", f"/maintenance/records/{r3['id']}/complete", {
+    "kind": "季度",
+    "items": [{"name": t["name"], "result": "正常", "note": "",
+               "required": True, "custom": False} for t in q_tpl],
+    "result": "正常", "signature": "王建国",
+}, token=WT)
+plan_after = next(p for p in call("GET", "/plans", token=WT) if p["elevator_id"] == ev8["id"])
+assert plan_after["cycle"] == "季度", plan_after["cycle"]
+assert 88 <= (plan_after["days_left"] - max(plan_before["days_left"], 0)) <= 92 or 88 <= plan_after["days_left"] <= 92
+print(f"3c) 季度保后计划按季度顺延 OK（周期={plan_after['cycle']}，剩 {plan_after['days_left']} 天）")
+
+# 3d：修改检验周期，对已有年检记录的电梯立即生效，并同步最新年检记录
+ev1 = call("GET", "/elevators/code/DT-2024001", token=AT)
+assert ev1["inspect_days_left"] == 365 - 200  # 默认 365 周期、200 天前检验
+call("PUT", f"/elevators/{ev1['id']}", {"inspect_cycle_days": 180}, token=AT)
+ev1b = call("GET", f"/elevators/{ev1['id']}", token=AT)
+assert ev1b["inspect_days_left"] == 180 - 200 and ev1b["inspect_status"] == "已过期", ev1b
+insp_latest = call("GET", f"/elevators/{ev1['id']}/inspections", token=AT)[0]
+assert insp_latest["next_date"] == str(date.today() + timedelta(days=180 - 200))
+print("3d) 修改检验周期即时生效、最新年检记录下次日期同步 OK")
+call("PUT", f"/elevators/{ev1['id']}", {"inspect_cycle_days": 365}, token=AT)
 
 orders = [o for o in call("GET", "/repairs?status=待接单", token=WT)
           if o["elevator"]["code"] == "DT-2024002"]

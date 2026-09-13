@@ -272,6 +272,17 @@ def update_elevator(
         raise HTTPException(400, f"使用登记证编号 {data['reg_code']} 已存在")
     for k, v in data.items():
         setattr(ev, k, v)
+    # 年检基准日期或周期变化时，同步最新年检记录的“下次检验日期”，
+    # 使列表、年检记录、提醒各处口径一致（历史记录本身保持不变）
+    if "last_inspect_date" in data or "inspect_cycle_days" in data:
+        latest_insp = db.scalar(
+            select(models.Inspection)
+            .where(models.Inspection.elevator_id == elevator_id)
+            .order_by(models.Inspection.inspect_date.desc())
+        )
+        if latest_insp and ev.last_inspect_date:
+            latest_insp.next_date = ev.last_inspect_date + timedelta(
+                days=ev.inspect_cycle_days or 365)
     db.commit()
     db.refresh(ev)
     return serialize_elevator(db, ev)
@@ -660,12 +671,14 @@ def complete_record(
         )
         ev.status = "故障" if open_repair else "正常"
 
-    # 推进维保计划：下次日期顺延一个周期（按计划周期，而非本次记录周期）
+    # 推进维保计划：本次实际完成哪种保养，就按该周期顺延，
+    # 并把计划周期同步为实际执行的类型（做了季度保后，下次到期日按季度走）
     if rec.plan_id:
         plan = db.get(models.MaintenancePlan, rec.plan_id)
-        cycle_days = {"半月": 15, "季度": 90, "半年": 180, "年度": 365}.get(plan.cycle, 15)
+        cycle_days = {"半月": 15, "季度": 90, "半年": 180, "年度": 365}.get(cycle, 15)
         base = max(plan.next_date, date.today())
         plan.next_date = base + timedelta(days=cycle_days)
+        plan.cycle = cycle
 
     # 发现异常：自动生成待接单维修工单（以实际检查结果为准）
     if abnormal_names:
@@ -889,8 +902,12 @@ def create_inspection(
     ensure_not_archived(ev)
     insp = models.Inspection(**payload.model_dump())
     db.add(insp)
-    # 同步更新档案的最近年检日期
+    # 同步档案：最近年检日期 + 以两次检验间隔校准检验周期，
+    # 保证列表/提醒与年检记录上的“下次检验日期”口径一致
     ev.last_inspect_date = payload.inspect_date
+    interval = (payload.next_date - payload.inspect_date).days
+    if interval > 0:
+        ev.inspect_cycle_days = interval
     db.commit()
     db.refresh(insp)
     return insp

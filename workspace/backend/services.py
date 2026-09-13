@@ -9,18 +9,20 @@ WARN_DAYS = 30  # 到期前 30 天进入预警
 
 
 def inspect_info(elevator: models.Elevator, today: date | None = None) -> dict:
-    """根据最近年检日期与周期计算下次年检、剩余天数和状态。"""
+    """计算下次年检、剩余天数和状态。
+
+    到期日以档案中的“最近年检日期 + 检验周期”为准，因此在档案中修改检验周期
+    立即生效；仅当档案缺少最近年检日期时，才回退使用最新年检记录上的日期。
+    """
     today = today or date.today()
-    if not elevator.last_inspect_date:
+    next_d = None
+    if elevator.last_inspect_date:
+        next_d = elevator.last_inspect_date + timedelta(days=elevator.inspect_cycle_days or 365)
+    elif elevator.inspections:
+        # 兼容旧数据：档案未登记年检日期时，取最新年检记录的下次检验日期
+        next_d = max(i.next_date for i in elevator.inspections)
+    if next_d is None:
         return {"next_inspect_date": None, "inspect_days_left": None, "inspect_status": "未建档"}
-    next_d = elevator.last_inspect_date + timedelta(days=elevator.inspect_cycle_days or 365)
-    # 若有年检记录则以最新记录的 next_date 为准
-    latest = max(
-        (i.next_date for i in elevator.inspections),
-        default=None,
-    )
-    if latest:
-        next_d = latest
     days = (next_d - today).days
     if days < 0:
         status = "已过期"
