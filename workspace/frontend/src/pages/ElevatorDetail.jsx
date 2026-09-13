@@ -1,38 +1,67 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  Card, Descriptions, Tabs, Table, Button, Tag, Space, Statistic, Row, Col, Image,
+  Card, Descriptions, Tabs, Table, Button, Tag, Space, Statistic, Row, Col, Image, Alert,
 } from 'antd'
-import { ArrowLeftOutlined, QrcodeOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, QrcodeOutlined, EditOutlined, RollbackOutlined } from '@ant-design/icons'
 import {
-  getElevator, getRecords, getRepairs, getElevatorInspections, qrUrl,
+  getElevator, getRecords, getRepairs, getElevatorInspections, qrUrl, restoreElevator,
 } from '../api.js'
 import { ElevatorStatusTag, InspectTag, RepairStatusTag, daysLeftText, fmtDate, fmtDateTime } from '../components/tags.jsx'
+import { useAuth } from '../auth.jsx'
+import { message } from 'antd'
 
 export default function ElevatorDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const { isAdmin } = useAuth()
   const [ev, setEv] = useState(null)
   const [records, setRecords] = useState([])
   const [repairs, setRepairs] = useState([])
   const [inspections, setInspections] = useState([])
 
-  useEffect(() => {
+  const reload = () => {
     getElevator(id).then(setEv)
-    getRecords({ elevator_id: id, limit: 50 }).then(setRecords)
-    getRepairs().then(rs => setRepairs(rs.filter(r => r.elevator_id === Number(id))))
+    getRecords({ elevator_id: id, limit: 50, include_archived: 1 }).then(setRecords)
+    getRepairs({ include_archived: 1 }).then(rs => setRepairs(rs.filter(r => r.elevator_id === Number(id))))
     getElevatorInspections(id).then(setInspections)
-  }, [id])
+  }
+  useEffect(reload, [id])
+
+  const doRestore = async () => {
+    await restoreElevator(id)
+    message.success('设备已恢复（停用状态），检查确认后可手动启用')
+    reload()
+  }
 
   if (!ev) return null
+  const archived = !!ev.is_archived
 
   return (
     <div>
+      {archived && (
+        <Alert
+          type="warning" showIcon style={{ marginBottom: 16 }}
+          message={<Space wrap>
+            <Tag color="red">{ev.archive_type}归档</Tag>
+            <span>该设备已于 {fmtDate(ev.archive_date)} 归档，经办人：{ev.archive_operator}，已退出日常维保与统计</span>
+          </Space>}
+          description={ev.archive_reason}
+          action={isAdmin && <Button danger icon={<RollbackOutlined />} onClick={doRestore}>恢复设备</Button>}
+        />
+      )}
       <Space style={{ marginBottom: 16 }}>
-        <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/elevators')}>返回列表</Button>
+        <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(archived && isAdmin ? '/archived' : '/elevators')}>
+          返回{archived ? '归档库' : '列表'}
+        </Button>
         <span className="page-title" style={{ margin: 0 }}>{ev.code}</span>
-        <ElevatorStatusTag status={ev.status} />
-        <InspectTag status={ev.inspect_status} />
+        {!archived && <>
+          <ElevatorStatusTag status={ev.status} />
+          <InspectTag status={ev.inspect_status} />
+        </>}
+        {isAdmin && !archived && (
+          <Button icon={<EditOutlined />} onClick={() => navigate('/elevators')}>在列表中编辑/归档</Button>
+        )}
       </Space>
 
       <Row gutter={16}>

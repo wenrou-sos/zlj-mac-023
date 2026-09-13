@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 
 from database import Base, engine, SessionLocal
 import models
+from auth import hash_password
 
 random.seed(42)
 TODAY = date.today()
@@ -73,6 +74,19 @@ def run():
             workers.append(w)
         db.flush()
 
+        # 登录账号：1 个管理员 + 每个维保人员 1 个账号（密码统一 123456）
+        db.add(models.User(
+            username="admin", password_hash=hash_password("admin123"),
+            name="系统管理员", role="管理员", active=1,
+        ))
+        for i, w in enumerate(workers):
+            db.add(models.User(
+                username=f"worker{i+1}",
+                password_hash=hash_password("123456"),
+                name=w.name, role="维保员", worker_id=w.id, active=1,
+            ))
+        db.flush()
+
         # 12 台电梯，年检状态分布：正常 / 即将到期 / 已过期 / 故障
         inspect_offsets = [200, 350, 340, 330, 100, 360, 370, 250, 320, 80, 300, 150]
         statuses = ["正常", "正常", "正常", "保养中", "正常", "正常",
@@ -109,10 +123,64 @@ def run():
             elevators.append(ev)
         db.flush()
 
+        # 第 13 台：已退场归档设备，历史记录全部保留
+        archived_ev = models.Elevator(
+            code="DT-20230013",
+            reg_code=f"梯33-A{TODAY.year-2}0099",
+            address="杭州市西湖区翠湖天地花园",
+            location_detail="3幢1单元（旧楼改造，设备已退场）",
+            brand="日立", model="HGP", type="客梯", floors=11,
+            install_date=d(-2600), use_date=d(-2500),
+            last_inspect_date=d(-400), inspect_cycle_days=365,
+            status="停用",
+            property_company="翠湖物业",
+            maintenance_company="杭州安捷电梯工程有限公司",
+            load_kg=1000, speed=1.6,
+            remark="旧楼加装改造，原设备退场",
+            is_archived=1, archive_type="退场", archive_date=d(-35),
+            archive_reason="旧楼整体改造，原电梯拆除退场，新梯另行建档",
+            archive_operator="系统管理员",
+        )
+        db.add(archived_ev)
+        elevators.append(archived_ev)
+        db.flush()
+        archived_plan = models.MaintenancePlan(
+            elevator_id=archived_ev.id, cycle="半月", next_date=d(-20),
+            assignee_id=workers[4].id, active=0, remark="随设备退场停用",
+        )
+        db.add(archived_plan)
+        for back in [60, 75, 90]:
+            db.add(models.MaintenanceRecord(
+                elevator_id=archived_ev.id, worker_id=workers[4].id,
+                kind="半月", check_in_time=dt(-back, 9, 10),
+                check_in_lat=30.2501, check_in_lng=120.1203,
+                finish_time=dt(-back, 10, 30),
+                items=[{"name": it, "result": "正常", "note": ""} for it in MAINT_ITEMS[:6]],
+                result="正常", signature=workers[4].name,
+            ))
+        db.add(models.RepairOrder(
+            order_no=f"WX{TODAY.strftime('%Y%m')}0099",
+            elevator_id=archived_ev.id, reporter="物业周经理",
+            reporter_phone="13900001111", report_time=dt(-70, 14),
+            fault_desc="退场前门系统异响，调整门机后正常",
+            fault_type="门系统", level="一般", status="已完成",
+            worker_id=workers[4].id, arrive_time=dt(-70, 14, 40),
+            finish_time=dt(-70, 16), solution="调整门机参数并润滑",
+            parts=["门机皮带x1"], cost=120,
+        ))
+        db.add(models.Inspection(
+            elevator_id=archived_ev.id, inspect_date=d(-400),
+            next_date=d(-35), org="杭州市特种设备检测研究院",
+            result="合格", certificate_no=f"JYZ{TODAY.year-1}0099",
+        ))
+        db.flush()
+
         # 每台电梯 1~2 个生效维保计划
         plan_offsets = [-5, 2, 6, 0, -12, 9, 14, 3, -2, 20, 28, 45]
         plans = []
         for i, ev in enumerate(elevators):
+            if ev.is_archived:
+                continue
             w = workers[i % len(workers)]
             p = models.MaintenancePlan(
                 elevator_id=ev.id,
@@ -206,6 +274,8 @@ def run():
 
         # 年检记录
         for i, ev in enumerate(elevators):
+            if ev.is_archived or i >= len(inspect_offsets):
+                continue
             if inspect_offsets[i] < 365:
                 insp = models.Inspection(
                     elevator_id=ev.id,
@@ -218,7 +288,7 @@ def run():
                 db.add(insp)
 
         db.commit()
-        print("模拟数据生成完成：12 台电梯、6 名维保人员、维保计划/保养记录/急修工单/年检记录若干。")
+        print("模拟数据生成完成：13 台电梯（含 1 台退场归档）、7 个登录账号、6 名维保人员、维保计划/保养记录/急修工单/年检记录若干。")
     finally:
         db.close()
 

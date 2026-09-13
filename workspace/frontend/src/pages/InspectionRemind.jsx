@@ -10,8 +10,10 @@ import {
   getExpiring, getInspections, getElevators, createInspection,
 } from '../api.js'
 import { InspectTag, daysLeftText, fmtDate } from '../components/tags.jsx'
+import { useAuth } from '../auth.jsx'
 
 export default function InspectionRemind() {
+  const { isAdmin } = useAuth()
   const [days, setDays] = useState(30)
   const [expiring, setExpiring] = useState([])
   const [allRecords, setAllRecords] = useState([])
@@ -58,7 +60,7 @@ export default function InspectionRemind() {
     { title: '状态', dataIndex: 'inspect_status', width: 100, render: v => <InspectTag status={v} /> },
     {
       title: '操作', width: 140,
-      render: (_, r) => (
+      render: (_, r) => (isAdmin ? (
         <Button size="small" type="primary" ghost onClick={() => {
           form.setFieldsValue({
             elevator_id: r.elevator.id,
@@ -69,7 +71,7 @@ export default function InspectionRemind() {
           })
           setOpen(true)
         }}>登记年检结果</Button>
-      ),
+      ) : <span style={{ color: '#999' }}>仅管理员登记</span>),
     },
   ]
 
@@ -97,14 +99,19 @@ export default function InspectionRemind() {
           ]} />
         <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         <div className="spacer" />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+        {isAdmin && <Button type="primary" icon={<PlusOutlined />} onClick={() => {
           form.setFieldsValue({
             inspect_date: dayjs(), next_date: dayjs().add(1, 'year'),
             result: '合格', org: '杭州市特种设备检测研究院',
           })
           setOpen(true)
-        }}>登记年检</Button>
+        }}>登记年检</Button>}
       </div>
+
+      {!isAdmin && (
+        <Alert type="info" showIcon style={{ marginBottom: 16 }}
+          message="维保员可查看年检到期提醒；年检结果登记仅管理员可操作。" />
+      )}
 
       {overdueCount > 0 && (
         <Alert type="error" showIcon icon={<NotificationOutlined />} style={{ marginBottom: 16 }}

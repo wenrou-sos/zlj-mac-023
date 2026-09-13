@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
-from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy import select, func, or_
@@ -15,11 +14,13 @@ import qrcode
 from database import Base, engine, get_db
 import models
 import schemas
+import auth
+from auth import get_current_user, require_admin, ROLE_ADMIN
 from services import inspect_info, serialize_elevator, WARN_DAYS
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="电梯维保管理系统 API", version="1.0.0")
+app = FastAPI(title="电梯维保管理系统 API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +36,35 @@ async def integrity_error_handler(request: Request, exc: IntegrityError):
     return JSONResponse(status_code=400, content={"detail": "数据冲突：编号或登记证号可能已存在"})
 
 
+def get_active_elevator(db: Session, elevator_id: int) -> models.Elevator:
+    ev = db.get(models.Elevator, elevator_id)
+    if not ev:
+        raise HTTPException(404, "电梯不存在")
+    return ev
+
+
+def ensure_not_archived(ev: models.Elevator):
+    if ev.is_archived:
+        raise HTTPException(400, f"该设备已{ev.archive_type or '归档'}，不能进行日常维保操作，如需恢复请联系管理员")
+
+
+# ---------------- 登录 ----------------
+@app.post("/api/auth/login", response_model=schemas.LoginResponse)
+def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
+    user = db.scalar(select(models.User).where(models.User.username == payload.username))
+    if not user or not auth.verify_password(payload.password, user.password_hash):
+        raise HTTPException(401, "用户名或密码错误")
+    if not user.active:
+        raise HTTPException(403, "账号已停用")
+    token = auth.create_token(user.id)
+    return {"token": token, "user": user}
+
+
+@app.get("/api/auth/me", response_model=schemas.UserOut)
+def me(user: models.User = Depends(get_current_user)):
+    return user
+
+
 # ---------------- 静态二维码 ----------------
 @app.get("/api/qrcode/{code}")
 def elevator_qrcode(code: str):
@@ -46,15 +76,22 @@ def elevator_qrcode(code: str):
     return StreamingResponse(buf, media_type="image/png")
 
 
-# ---------------- 首页统计 ----------------
+# ---------------- 首页统计（只统计在用设备） ----------------
 @app.get("/api/dashboard")
-def dashboard(db: Session = Depends(get_db)):
+def dashboard(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     today = date.today()
-    elevators = db.scalars(select(models.Elevator)).all()
+    elevators = db.scalars(
+        select(models.Elevator).where(models.Elevator.is_archived == 0)
+    ).all()
 
+    active_ids = [e.id for e in elevators]
     total = len(elevators)
     fault = sum(1 for e in elevators if e.status == "故障")
     stopped = sum(1 for e in elevators if e.status == "停用")
+    in_maint = sum(1 for e in elevators if e.status == "保养中")
     inspect_soon = inspect_overdue = 0
     for e in elevators:
         st = inspect_info(e, today)
@@ -63,21 +100,27 @@ def dashboard(db: Session = Depends(get_db)):
         elif st["inspect_status"] == "已过期":
             inspect_overdue += 1
 
-    open_repairs = db.scalar(
-        select(func.count(models.RepairOrder.id)).where(
-            models.RepairOrder.status.in_(["待接单", "已派单", "维修中"])
-        )
-    )
-    urgent_repairs = db.scalar(
-        select(func.count(models.RepairOrder.id)).where(
-            models.RepairOrder.status.in_(["待接单", "已派单", "维修中"]),
-            models.RepairOrder.level == "紧急",
-        )
+    archived_total = db.scalar(
+        select(func.count(models.Elevator.id)).where(models.Elevator.is_archived == 1)
     )
 
-    # 逾期/即将到期的维保计划
+    def count_repairs(extra=()):
+        conds = [
+            models.RepairOrder.status.in_(["待接单", "已派单", "维修中"]),
+            models.RepairOrder.elevator_id.in_(active_ids or [0]),
+            *extra,
+        ]
+        return db.scalar(select(func.count(models.RepairOrder.id)).where(*conds))
+
+    open_repairs = count_repairs()
+    urgent_repairs = count_repairs([models.RepairOrder.level == "紧急"])
+
+    # 逾期/即将到期的维保计划（排除已归档设备）
     plans = db.scalars(
-        select(models.MaintenancePlan).where(models.MaintenancePlan.active == 1)
+        select(models.MaintenancePlan).where(
+            models.MaintenancePlan.active == 1,
+            models.MaintenancePlan.elevator_id.in_(active_ids or [0]),
+        )
     ).all()
     plan_overdue = sum(1 for p in plans if p.next_date < today)
     plan_soon = sum(1 for p in plans if today <= p.next_date <= today + timedelta(days=7))
@@ -85,7 +128,8 @@ def dashboard(db: Session = Depends(get_db)):
     month_start = today.replace(day=1)
     month_records = db.scalar(
         select(func.count(models.MaintenanceRecord.id)).where(
-            models.MaintenanceRecord.check_in_time >= datetime.combine(month_start, datetime.min.time())
+            models.MaintenanceRecord.check_in_time >= datetime.combine(month_start, datetime.min.time()),
+            models.MaintenanceRecord.elevator_id.in_(active_ids or [0]),
         )
     )
 
@@ -105,9 +149,10 @@ def dashboard(db: Session = Depends(get_db)):
 
     return {
         "elevator_total": total,
-        "elevator_normal": total - fault - stopped,
+        "elevator_normal": total - fault - stopped - in_maint,
         "elevator_fault": fault,
         "elevator_stopped": stopped,
+        "archived_total": archived_total,
         "inspect_soon": inspect_soon,
         "inspect_overdue": inspect_overdue,
         "repair_open": open_repairs,
@@ -125,13 +170,16 @@ def list_elevators(
     keyword: str | None = None,
     status: str | None = None,
     inspect_status: str | None = None,
+    archived: int = 0,
     db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
-    stmt = select(models.Elevator).order_by(models.Elevator.code)
+    stmt = select(models.Elevator).where(models.Elevator.is_archived == archived).order_by(models.Elevator.code)
     if keyword:
         kw = f"%{keyword}%"
         stmt = stmt.where(or_(
             models.Elevator.code.like(kw),
+            models.Elevator.reg_code.like(kw),
             models.Elevator.address.like(kw),
             models.Elevator.location_detail.like(kw),
             models.Elevator.brand.like(kw),
@@ -147,7 +195,11 @@ def list_elevators(
 
 
 @app.get("/api/elevators/code/{code}", response_model=schemas.ElevatorOut)
-def get_elevator_by_code(code: str, db: Session = Depends(get_db)):
+def get_elevator_by_code(
+    code: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     ev = db.scalar(select(models.Elevator).where(models.Elevator.code == code))
     if not ev:
         raise HTTPException(404, f"未找到编号为 {code} 的电梯")
@@ -155,15 +207,20 @@ def get_elevator_by_code(code: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/elevators/{elevator_id}", response_model=schemas.ElevatorOut)
-def get_elevator(elevator_id: int, db: Session = Depends(get_db)):
-    ev = db.get(models.Elevator, elevator_id)
-    if not ev:
-        raise HTTPException(404, "电梯不存在")
-    return serialize_elevator(db, ev)
+def get_elevator(
+    elevator_id: int,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    return serialize_elevator(db, get_active_elevator(db, elevator_id))
 
 
 @app.post("/api/elevators", response_model=schemas.ElevatorOut)
-def create_elevator(payload: schemas.ElevatorCreate, db: Session = Depends(get_db)):
+def create_elevator(
+    payload: schemas.ElevatorCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
     if db.scalar(select(models.Elevator).where(models.Elevator.code == payload.code)):
         raise HTTPException(400, f"设备编号 {payload.code} 已存在")
     if payload.reg_code and db.scalar(
@@ -178,10 +235,13 @@ def create_elevator(payload: schemas.ElevatorCreate, db: Session = Depends(get_d
 
 
 @app.put("/api/elevators/{elevator_id}", response_model=schemas.ElevatorOut)
-def update_elevator(elevator_id: int, payload: schemas.ElevatorUpdate, db: Session = Depends(get_db)):
-    ev = db.get(models.Elevator, elevator_id)
-    if not ev:
-        raise HTTPException(404, "电梯不存在")
+def update_elevator(
+    elevator_id: int,
+    payload: schemas.ElevatorUpdate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
+    ev = get_active_elevator(db, elevator_id)
     data = payload.model_dump(exclude_unset=True)
     # 唯一性校验（排除自身）
     if data.get("code") and db.scalar(
@@ -206,23 +266,93 @@ def update_elevator(elevator_id: int, payload: schemas.ElevatorUpdate, db: Sessi
 
 
 @app.delete("/api/elevators/{elevator_id}")
-def delete_elevator(elevator_id: int, db: Session = Depends(get_db)):
+def delete_elevator(elevator_id: int, user: models.User = Depends(get_current_user)):
+    """物理删除已全面停用：档案与全部历史只能归档保留。"""
+    raise HTTPException(403, "系统不支持删除档案；请由管理员执行“报废/移交/退场”归档操作，历史记录将长期保留")
+
+
+# ---- 归档（报废 / 移交 / 退场）与恢复：仅管理员 ----
+@app.post("/api/elevators/{elevator_id}/archive", response_model=schemas.ElevatorOut)
+def archive_elevator(
+    elevator_id: int,
+    payload: schemas.ArchiveCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
+    ev = get_active_elevator(db, elevator_id)
+    if ev.is_archived:
+        raise HTTPException(400, "该设备已归档")
+    if payload.archive_type not in ("报废", "移交", "退场"):
+        raise HTTPException(400, "归档类型必须是 报废 / 移交 / 退场")
+
+    # 存在未完成急修或保养时不允许归档
+    open_repair = db.scalar(
+        select(models.RepairOrder).where(
+            models.RepairOrder.elevator_id == ev.id,
+            models.RepairOrder.status.in_(["待接单", "已派单", "维修中"]),
+        )
+    )
+    ongoing = db.scalar(
+        select(models.MaintenanceRecord).where(
+            models.MaintenanceRecord.elevator_id == ev.id,
+            models.MaintenanceRecord.finish_time.is_(None),
+        )
+    )
+    if open_repair or ongoing:
+        raise HTTPException(400, "该设备存在未完成的急修工单或保养记录，请先处理完毕再归档")
+
+    ev.is_archived = 1
+    ev.archive_type = payload.archive_type
+    ev.archive_date = date.today()
+    ev.archive_reason = payload.reason
+    ev.archive_operator = user.name
+    # 生效维保计划随归档停用（数据保留），恢复后不自动启用
+    for p in ev.plans:
+        if p.active:
+            p.active = 0
+    db.commit()
+    db.refresh(ev)
+    return serialize_elevator(db, ev)
+
+
+@app.post("/api/elevators/{elevator_id}/restore", response_model=schemas.ElevatorOut)
+def restore_elevator(
+    elevator_id: int,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
     ev = db.get(models.Elevator, elevator_id)
     if not ev:
         raise HTTPException(404, "电梯不存在")
-    db.delete(ev)
+    if not ev.is_archived:
+        raise HTTPException(400, "该设备未归档")
+    ev.is_archived = 0
+    ev.archive_type = None
+    ev.archive_date = None
+    ev.archive_reason = None
+    ev.archive_operator = None
+    # 恢复后处于停用状态，由管理员检查确认后手动启用（计划也需重新启用/排期）
+    ev.status = "停用"
     db.commit()
-    return {"ok": True}
+    db.refresh(ev)
+    return serialize_elevator(db, ev)
 
 
 # ---------------- 维保人员 ----------------
 @app.get("/api/workers", response_model=list[schemas.WorkerOut])
-def list_workers(db: Session = Depends(get_db)):
+def list_workers(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     return db.scalars(select(models.Worker).order_by(models.Worker.id)).all()
 
 
 @app.post("/api/workers", response_model=schemas.WorkerOut)
-def create_worker(payload: schemas.WorkerCreate, db: Session = Depends(get_db)):
+def create_worker(
+    payload: schemas.WorkerCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
     w = models.Worker(**payload.model_dump())
     db.add(w)
     db.commit()
@@ -232,11 +362,18 @@ def create_worker(payload: schemas.WorkerCreate, db: Session = Depends(get_db)):
 
 # ---------------- 维保计划 ----------------
 @app.get("/api/plans", response_model=list[schemas.PlanOut])
-def list_plans(scope: str = "active", db: Session = Depends(get_db)):
+def list_plans(
+    scope: str = "active",
+    include_archived: int = 0,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     today = date.today()
     stmt = select(models.MaintenancePlan).options(selectinload(models.MaintenancePlan.elevator))
     if scope == "active":
         stmt = stmt.where(models.MaintenancePlan.active == 1)
+    if not include_archived:
+        stmt = stmt.join(models.Elevator).where(models.Elevator.is_archived == 0)
     plans = db.scalars(stmt.order_by(models.MaintenancePlan.next_date)).all()
     out = []
     for p in plans:
@@ -248,9 +385,13 @@ def list_plans(scope: str = "active", db: Session = Depends(get_db)):
 
 
 @app.post("/api/plans", response_model=schemas.PlanOut)
-def create_plan(payload: schemas.PlanCreate, db: Session = Depends(get_db)):
-    if not db.get(models.Elevator, payload.elevator_id):
-        raise HTTPException(404, "电梯不存在")
+def create_plan(
+    payload: schemas.PlanCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
+    ev = get_active_elevator(db, payload.elevator_id)
+    ensure_not_archived(ev)
     p = models.MaintenancePlan(**payload.model_dump())
     db.add(p)
     db.commit()
@@ -259,23 +400,47 @@ def create_plan(payload: schemas.PlanCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/api/plans/{plan_id}/toggle", response_model=schemas.PlanOut)
-def toggle_plan(plan_id: int, db: Session = Depends(get_db)):
+def toggle_plan(
+    plan_id: int,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
     p = db.get(models.MaintenancePlan, plan_id)
     if not p:
         raise HTTPException(404, "计划不存在")
+    ev = db.get(models.Elevator, p.elevator_id)
+    if ev.is_archived:
+        raise HTTPException(400, f"设备已{ev.archive_type or '归档'}，如需启用计划请先恢复设备")
     p.active = 0 if p.active else 1
     db.commit()
     db.refresh(p)
     return p
 
 
-# ---------------- 扫码签到 + 保养记录 ----------------
+# ---------------- 扫码签到 + 保养记录（管理员/维保员） ----------------
 @app.post("/api/maintenance/check-in", response_model=schemas.RecordOut)
-def check_in(payload: schemas.CheckInCreate, db: Session = Depends(get_db)):
+def check_in(
+    payload: schemas.CheckInCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     ev = db.scalar(select(models.Elevator).where(models.Elevator.code == payload.elevator_code))
     if not ev:
         raise HTTPException(404, f"二维码无效：未找到电梯 {payload.elevator_code}")
-    worker = db.get(models.Worker, payload.worker_id)
+    ensure_not_archived(ev)
+
+    # 维保员只能以本人身份签到（其账号绑定的维保人员）
+    if user.role != ROLE_ADMIN:
+        if not user.worker_id:
+            raise HTTPException(403, "当前账号未绑定维保人员，无法签到")
+        if payload.worker_id and payload.worker_id != user.worker_id:
+            raise HTTPException(403, "维保员只能以本人身份签到，不可代签")
+        worker_id = user.worker_id
+    else:
+        worker_id = payload.worker_id or user.worker_id
+    if not worker_id:
+        raise HTTPException(400, "请选择签到的维保人员")
+    worker = db.get(models.Worker, worker_id)
     if not worker:
         raise HTTPException(404, "维保人员不存在")
 
@@ -330,13 +495,22 @@ def check_in(payload: schemas.CheckInCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/api/maintenance/records/{record_id}/take-over", response_model=schemas.RecordOut)
-def take_over_record(record_id: int, payload: schemas.TakeOverCreate, db: Session = Depends(get_db)):
+def take_over_record(
+    record_id: int,
+    payload: schemas.TakeOverCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """换人接手未完成的保养记录：记录改挂到新维保人员名下，并追加一条接手备注。"""
     rec = db.get(models.MaintenanceRecord, record_id)
     if not rec:
         raise HTTPException(404, "保养记录不存在")
     if rec.finish_time:
         raise HTTPException(400, "该记录已完成，无需接手")
+
+    # 维保员只能自己接手，不能把别人的记录转给第三人
+    if user.role != ROLE_ADMIN and user.worker_id != payload.worker_id:
+        raise HTTPException(403, "只能由接手人本人确认接手")
     new_worker = db.get(models.Worker, payload.worker_id)
     if not new_worker:
         raise HTTPException(404, "维保人员不存在")
@@ -354,12 +528,19 @@ def take_over_record(record_id: int, payload: schemas.TakeOverCreate, db: Sessio
 
 
 @app.put("/api/maintenance/records/{record_id}/complete", response_model=schemas.RecordOut)
-def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session = Depends(get_db)):
+def complete_record(
+    record_id: int,
+    payload: schemas.RecordComplete,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     rec = db.get(models.MaintenanceRecord, record_id)
     if not rec:
         raise HTTPException(404, "保养记录不存在")
     if rec.finish_time:
         raise HTTPException(400, "该记录已完成")
+    ev = db.get(models.Elevator, rec.elevator_id)
+    ensure_not_archived(ev)
 
     rec.kind = payload.kind
     rec.items = [it.model_dump() for it in payload.items]
@@ -368,7 +549,6 @@ def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session
     rec.signature = payload.signature
     rec.finish_time = datetime.now()
 
-    ev = db.get(models.Elevator, rec.elevator_id)
     # 仅对“保养中”的电梯做状态联动；“停用”是人工设置状态，保养流程不得覆盖
     if ev.status == "保养中":
         open_repair = db.scalar(
@@ -386,7 +566,7 @@ def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session
         base = max(plan.next_date, date.today())
         plan.next_date = base + timedelta(days=cycle_days)
 
-    # 发现异常：自动生成紧急维修工单
+    # 发现异常：自动生成待接单维修工单
     if payload.result == "异常":
         order = models.RepairOrder(
             order_no=f"WX{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -414,8 +594,10 @@ def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session
 def list_records(
     elevator_id: int | None = None,
     ongoing: bool | None = None,
+    include_archived: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
     stmt = (
         select(models.MaintenanceRecord)
@@ -425,6 +607,8 @@ def list_records(
     )
     if elevator_id:
         stmt = stmt.where(models.MaintenanceRecord.elevator_id == elevator_id)
+    elif not include_archived:
+        stmt = stmt.join(models.Elevator).where(models.Elevator.is_archived == 0)
     if ongoing is True:
         stmt = stmt.where(models.MaintenanceRecord.finish_time.is_(None))
     elif ongoing is False:
@@ -433,16 +617,22 @@ def list_records(
     return records
 
 
-# ---------------- 故障急修 ----------------
+# ---------------- 故障急修（报修/流转：管理员与维保员均可） ----------------
 @app.get("/api/repairs", response_model=list[schemas.RepairOut])
-def list_repairs(status: str | None = None, db: Session = Depends(get_db)):
+def list_repairs(
+    status: str | None = None,
+    include_archived: int = 0,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     stmt = select(models.RepairOrder).options(
         selectinload(models.RepairOrder.elevator), selectinload(models.RepairOrder.worker)
     )
     if status:
         stmt = stmt.where(models.RepairOrder.status == status)
+    if not include_archived:
+        stmt = stmt.join(models.Elevator).where(models.Elevator.is_archived == 0)
     orders = db.scalars(stmt.order_by(models.RepairOrder.report_time.desc())).all()
-    today = date.today()
     out = []
     for o in orders:
         d = schemas.RepairOut.model_validate(o)
@@ -453,7 +643,11 @@ def list_repairs(status: str | None = None, db: Session = Depends(get_db)):
 
 
 @app.post("/api/repairs", response_model=schemas.RepairOut)
-def create_repair(payload: schemas.RepairCreate, db: Session = Depends(get_db)):
+def create_repair(
+    payload: schemas.RepairCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     elevator_id = payload.elevator_id
     if not elevator_id and payload.elevator_code:
         ev = db.scalar(select(models.Elevator).where(models.Elevator.code == payload.elevator_code))
@@ -462,6 +656,8 @@ def create_repair(payload: schemas.RepairCreate, db: Session = Depends(get_db)):
         elevator_id = ev.id
     if not elevator_id:
         raise HTTPException(400, "必须指定电梯")
+    ev = get_active_elevator(db, elevator_id)
+    ensure_not_archived(ev)
     order = models.RepairOrder(
         order_no=f"WX{datetime.now().strftime('%Y%m%d%H%M%S')}",
         elevator_id=elevator_id,
@@ -473,7 +669,6 @@ def create_repair(payload: schemas.RepairCreate, db: Session = Depends(get_db)):
         level=payload.level,
         status="待接单",
     )
-    ev = db.get(models.Elevator, elevator_id)
     if ev.status != "停用":
         ev.status = "故障"
     db.add(order)
@@ -484,10 +679,18 @@ def create_repair(payload: schemas.RepairCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/api/repairs/{order_id}", response_model=schemas.RepairOut)
-def update_repair(order_id: int, payload: schemas.RepairUpdate, db: Session = Depends(get_db)):
+def update_repair(
+    order_id: int,
+    payload: schemas.RepairUpdate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     order = db.get(models.RepairOrder, order_id)
     if not order:
         raise HTTPException(404, "工单不存在")
+    ev = db.get(models.Elevator, order.elevator_id)
+    if ev.is_archived and payload.status != "已完成":
+        raise HTTPException(400, "设备已归档，不能继续流转工单")
 
     old_status = order.status
     data = payload.model_dump(exclude_unset=True)
@@ -502,9 +705,8 @@ def update_repair(order_id: int, payload: schemas.RepairUpdate, db: Session = De
         setattr(order, k, v)
 
     if new_status in ("已完成", "已派单", "维修中"):
-        ev = db.get(models.Elevator, order.elevator_id)
-        # 停用梯不自动恢复运行；完成急修后回到“停用”，需人工确认再启用
-        if ev.status != "停用":
+        # 停用/归档梯不自动恢复运行
+        if ev.status not in ("停用",) and not ev.is_archived:
             ev.status = "正常" if new_status == "已完成" else "故障"
 
     db.commit()
@@ -512,18 +714,22 @@ def update_repair(order_id: int, payload: schemas.RepairUpdate, db: Session = De
     return order
 
 
-# ---------------- 年检 ----------------
+# ---------------- 年检（登记仅管理员；提醒对全部登录用户可见） ----------------
 @app.get("/api/inspections", response_model=list[schemas.InspectionOut])
 def list_inspections(
-    warn_days: int = Query(default=WARN_DAYS, description="预警天数"),
+    include_archived: int = 0,
     db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
     today = date.today()
-    rows = db.scalars(
+    stmt = (
         select(models.Inspection)
         .options(selectinload(models.Inspection.elevator))
         .order_by(models.Inspection.next_date)
-    ).all()
+    )
+    if not include_archived:
+        stmt = stmt.join(models.Elevator).where(models.Elevator.is_archived == 0)
+    rows = db.scalars(stmt).all()
     out = []
     for r in rows:
         d = schemas.InspectionOut.model_validate(r)
@@ -533,12 +739,18 @@ def list_inspections(
 
 
 @app.get("/api/inspections/expiring")
-def expiring_inspections(days: int = WARN_DAYS, db: Session = Depends(get_db)):
-    """年检到期提醒：返回已过期 + N 天内到期的电梯。"""
+def expiring_inspections(
+    days: int = WARN_DAYS,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """年检到期提醒：返回已过期 + N 天内到期的在用电梯。"""
     today = date.today()
     deadline = today + timedelta(days=days)
     elevators = db.scalars(
-        select(models.Elevator).options(selectinload(models.Elevator.inspections))
+        select(models.Elevator)
+        .where(models.Elevator.is_archived == 0)
+        .options(selectinload(models.Elevator.inspections))
     ).all()
     items = []
     for ev in elevators:
@@ -557,10 +769,13 @@ def expiring_inspections(days: int = WARN_DAYS, db: Session = Depends(get_db)):
 
 
 @app.post("/api/inspections", response_model=schemas.InspectionOut)
-def create_inspection(payload: schemas.InspectionCreate, db: Session = Depends(get_db)):
-    ev = db.get(models.Elevator, payload.elevator_id)
-    if not ev:
-        raise HTTPException(404, "电梯不存在")
+def create_inspection(
+    payload: schemas.InspectionCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+):
+    ev = get_active_elevator(db, payload.elevator_id)
+    ensure_not_archived(ev)
     insp = models.Inspection(**payload.model_dump())
     db.add(insp)
     # 同步更新档案的最近年检日期
@@ -571,7 +786,11 @@ def create_inspection(payload: schemas.InspectionCreate, db: Session = Depends(g
 
 
 @app.get("/api/elevators/{elevator_id}/inspections", response_model=list[schemas.InspectionOut])
-def elevator_inspections(elevator_id: int, db: Session = Depends(get_db)):
+def elevator_inspections(
+    elevator_id: int,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     return db.scalars(
         select(models.Inspection)
         .where(models.Inspection.elevator_id == elevator_id)

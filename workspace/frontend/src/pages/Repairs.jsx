@@ -23,7 +23,7 @@ export default function Repairs() {
   const navigate = useNavigate()
 
   const load = () => {
-    getRepairs(filter === 'all' ? null : filter).then(setRows)
+    getRepairs(filter === 'all' ? undefined : { status: filter }).then(setRows)
   }
   useEffect(() => { load() }, [filter])
   useEffect(() => { getElevators().then(setElevators); getWorkers().then(setWorkers) }, [])
@@ -69,6 +69,7 @@ export default function Repairs() {
       }
       await updateRepair(current.id, payload)
       message.success(`工单已更新为「${nextStatus}」`)
+      // 抽屉数据用全量刷新（流转后工单可能已不属于当前筛选）
       const updated = await getRepairs()
       setRows(filter === 'all' ? updated : updated.filter(r => r.status === filter))
       setCurrent(updated.find(r => r.id === current.id))

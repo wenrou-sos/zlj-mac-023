@@ -8,8 +8,10 @@ import { useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { getPlans, createPlan, togglePlan, getElevators, getWorkers } from '../api.js'
 import { daysLeftText, fmtDate } from '../components/tags.jsx'
+import { useAuth } from '../auth.jsx'
 
 export default function Plans() {
+  const { isAdmin } = useAuth()
   const [rows, setRows] = useState([])
   const [elevators, setElevators] = useState([])
   const [workers, setWorkers] = useState([])
@@ -61,8 +63,10 @@ export default function Plans() {
       render: (_, r) => (
         <Space>
           <Button size="small" type="link" onClick={() => navigate('/scan')}>去签到</Button>
-          <PopconfirmInline onOk={async () => { await togglePlan(r.id); message.success('状态已更新'); load() }}
-            text={r.active ? '停用' : '启用'} danger={!!r.active} />
+          {isAdmin && <PopconfirmInline onOk={async () => {
+            try { await togglePlan(r.id); message.success('状态已更新'); load() }
+            catch (e) { message.error(e.userMessage) }
+          }} text={r.active ? '停用' : '启用'} danger={!!r.active} />}
         </Space>
       ),
     },
@@ -79,8 +83,13 @@ export default function Plans() {
         ]} value={scope} onChange={setScope} />
         <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         <div className="spacer" />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新增计划</Button>
+        {isAdmin && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新增计划</Button>}
       </div>
+
+      {!isAdmin && (
+        <Alert type="info" showIcon style={{ marginBottom: 16 }}
+          message="维保员可查看计划并扫码执行保养；计划的新增、停用/启用仅管理员可操作。" />
+      )}
 
       {overdueCount > 0 && scope === 'active' && (
         <Alert type="error" showIcon style={{ marginBottom: 16 }}

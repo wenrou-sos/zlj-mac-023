@@ -7,10 +7,10 @@ import {
   ScanOutlined, EnvironmentOutlined, CheckCircleOutlined, SafetyOutlined,
 } from '@ant-design/icons'
 import {
-  getElevators, getWorkers, checkIn, completeRecord, qrUrl,
+  getElevators, getWorkers, checkIn, completeRecord, takeOverRecord, qrUrl,
 } from '../api.js'
-import { ElevatorStatusTag } from '../components/tags.jsx'
-import { fmtDateTime } from '../components/tags.jsx'
+import { ElevatorStatusTag, fmtDateTime } from '../components/tags.jsx'
+import { useAuth } from '../auth.jsx'
 
 const { Title, Text } = Typography
 
@@ -31,12 +31,14 @@ const DEFAULT_ITEMS = [
 ]
 
 export default function ScanCheckIn() {
+  const { user, isAdmin } = useAuth()
   const [elevators, setElevators] = useState([])
   const [workers, setWorkers] = useState([])
   const [step, setStep] = useState(0)
   const [scanning, setScanning] = useState(false)
   const [elevator, setElevator] = useState(null)
-  const [workerId, setWorkerId] = useState(null)
+  // 维保员账号绑定本人，签到身份固定；管理员可代选任意维保人员
+  const [workerId, setWorkerId] = useState(user?.role === '维保员' ? user.worker_id : null)
   const [record, setRecord] = useState(null)
   const [form] = Form.useForm()
   const scanTimer = useRef(null)
@@ -172,11 +174,19 @@ export default function ScanCheckIn() {
             message="演示环境无摄像头，点击「模拟扫码」将随机识别一台电梯；也可在下方选择指定电梯扫码。" />
 
           <Form layout="inline" style={{ marginBottom: 20, justifyContent: 'center' }}>
-            <Form.Item label="签到人员">
-              <Select style={{ width: 260 }} placeholder="选择维保人员（模拟当前登录人）"
-                value={workerId} onChange={setWorkerId}
-                options={workers.map(w => ({ value: w.id, label: `${w.name}（${w.team || w.role}）` }))} />
-            </Form.Item>
+            {isAdmin ? (
+              <Form.Item label="签到人员（管理员可代选）">
+                <Select style={{ width: 300 }} placeholder="选择维保人员"
+                  value={workerId} onChange={setWorkerId}
+                  options={workers.map(w => ({ value: w.id, label: `${w.name}（${w.team || w.role}）` }))} />
+              </Form.Item>
+            ) : (
+              <Form.Item label="签到人员">
+                <Tag color="blue" style={{ fontSize: 14, padding: '4px 12px' }}>
+                  {user.name}（本人，不可代签）
+                </Tag>
+              </Form.Item>
+            )}
           </Form>
 
           <div style={{ textAlign: 'center' }}>

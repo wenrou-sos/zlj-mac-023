@@ -8,6 +8,30 @@ class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ---------- 登录 / 用户 ----------
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserOut(ORMModel):
+    id: int
+    username: str
+    name: str
+    role: str
+    worker_id: Optional[int] = None
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user: UserOut
+
+
+class ArchiveCreate(BaseModel):
+    archive_type: str   # 报废 / 移交 / 退场
+    reason: str = ""
+
+
 # ---------- 电梯 ----------
 class ElevatorBase(BaseModel):
     code: str
@@ -75,6 +99,11 @@ class ElevatorOut(ORMModel):
     load_kg: Optional[int]
     speed: Optional[float]
     remark: Optional[str]
+    is_archived: Optional[int] = 0
+    archive_type: Optional[str] = None
+    archive_date: Optional[date] = None
+    archive_reason: Optional[str] = None
+    archive_operator: Optional[str] = None
     # 动态计算字段
     next_inspect_date: Optional[date] = None
     inspect_days_left: Optional[int] = None

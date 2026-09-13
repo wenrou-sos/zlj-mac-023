@@ -8,6 +8,22 @@ from sqlalchemy.orm import relationship
 from database import Base
 
 
+class User(Base):
+    """系统登录用户（关联维保人员，管理员可不关联）"""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(String(50), unique=True, nullable=False)
+    password_hash = Column(String(200), nullable=False)
+    name = Column(String(50), nullable=False)
+    role = Column(String(20), nullable=False, default="维保员")  # 管理员 / 维保员
+    worker_id = Column(Integer, ForeignKey("workers.id"), nullable=True)
+    active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.now)
+
+    worker = relationship("Worker")
+
+
 class Elevator(Base):
     """电梯档案"""
     __tablename__ = "elevators"
@@ -31,12 +47,19 @@ class Elevator(Base):
     load_kg = Column(Integer, default=1000)             # 额定载重
     speed = Column(Float, default=1.75)                 # 额定速度 m/s
     remark = Column(Text, default="")
+    # 归档信息：报废 / 移交 / 退场（仅管理员可执行；数据长期保留、可恢复）
+    is_archived = Column(Integer, default=0, index=True)
+    archive_type = Column(String(10))                   # 报废/移交/退场
+    archive_date = Column(Date)
+    archive_reason = Column(Text)
+    archive_operator = Column(String(50))
     created_at = Column(DateTime, default=datetime.now)
 
-    plans = relationship("MaintenancePlan", back_populates="elevator", cascade="all, delete-orphan")
-    records = relationship("MaintenanceRecord", back_populates="elevator", cascade="all, delete-orphan")
-    repairs = relationship("RepairOrder", back_populates="elevator", cascade="all, delete-orphan")
-    inspections = relationship("Inspection", back_populates="elevator", cascade="all, delete-orphan")
+    # 历史记录长期保留，不随档案删除（系统仅提供归档，不提供物理删除）
+    plans = relationship("MaintenancePlan", back_populates="elevator")
+    records = relationship("MaintenanceRecord", back_populates="elevator")
+    repairs = relationship("RepairOrder", back_populates="elevator")
+    inspections = relationship("Inspection", back_populates="elevator")
 
 
 class Worker(Base):

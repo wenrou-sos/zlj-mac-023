@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react'
 import {
   Card, Table, Input, Select, Button, Space, Modal, Form, InputNumber,
-  DatePicker, Popconfirm, message, Image, Tag, Row, Col,
+  DatePicker, message, Image, Tag, Row, Col, Alert,
 } from 'antd'
-import { PlusOutlined, ReloadOutlined, QrcodeOutlined } from '@ant-design/icons'
+import {
+  PlusOutlined, ReloadOutlined, QrcodeOutlined, InboxOutlined,
+} from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
-import { getElevators, createElevator, updateElevator, deleteElevator, qrUrl } from '../api.js'
+import {
+  getElevators, createElevator, updateElevator, archiveElevator, qrUrl,
+} from '../api.js'
 import { ElevatorStatusTag, InspectTag, daysLeftText } from '../components/tags.jsx'
+import { useAuth } from '../auth.jsx'
 
 export default function Elevators() {
   const [rows, setRows] = useState([])
@@ -16,9 +21,12 @@ export default function Elevators() {
   const [status, setStatus] = useState()
   const [inspectStatus, setInspectStatus] = useState()
   const [modal, setModal] = useState({ open: false, record: null })
-  const [qr, setQr] = useState(null) // 查看二维码
+  const [archiving, setArchiving] = useState(null)
+  const [qrCode, setQrCode] = useState(null)
+  const [archiveForm] = Form.useForm()
   const [form] = Form.useForm()
   const navigate = useNavigate()
+  const { isAdmin } = useAuth()
 
   const load = () => {
     setLoading(true)
@@ -58,8 +66,20 @@ export default function Elevators() {
       setModal({ open: false, record: null })
       load()
     } catch (e) {
-      // 编号/登记证号重复等：保留弹窗并展示具体原因
       message.error(e.userMessage || '保存失败')
+    }
+  }
+
+  const submitArchive = async () => {
+    const v = await archiveForm.validateFields()
+    try {
+      await archiveElevator(archiving.id, v.archive_type, v.reason)
+      message.success(`已${v.archive_type}归档，历史记录完整保留，可在归档库恢复`)
+      setArchiving(null)
+      archiveForm.resetFields()
+      load()
+    } catch (e) {
+      message.error(e.userMessage || '归档失败')
     }
   }
 
@@ -68,7 +88,7 @@ export default function Elevators() {
       title: '二维码', dataIndex: 'code', width: 80, align: 'center',
       render: (code) => (
         <img className="qr-thumb" src={qrUrl(code)} alt={code} title="点击查看大图"
-          onClick={() => setQr(code)} />
+          onClick={() => setQrCode(code)} />
       ),
     },
     { title: '设备编号', dataIndex: 'code', width: 120, render: (v, r) => <a onClick={() => navigate(`/elevators/${r.id}`)}>{v}</a> },
@@ -98,14 +118,17 @@ export default function Elevators() {
       render: (_, r) => daysLeftText(r.plan_days_left),
     },
     {
-      title: '操作', width: 130,
+      title: '操作', width: isAdmin ? 180 : 80,
       render: (_, r) => (
-        <Space size="small">
+        <Space size="small" wrap>
           <Button size="small" type="link" onClick={() => navigate(`/elevators/${r.id}`)}>详情</Button>
-          <Button size="small" type="link" onClick={() => openEdit(r)}>编辑</Button>
-          <Popconfirm title="确认删除该电梯档案？关联记录将一并删除" onConfirm={async () => { await deleteElevator(r.id); message.success('已删除'); load() }}>
-            <Button size="small" type="link" danger>删除</Button>
-          </Popconfirm>
+          {isAdmin && <Button size="small" type="link" onClick={() => openEdit(r)}>编辑</Button>}
+          {isAdmin && (
+            <Button size="small" type="link" danger onClick={() => {
+              archiveForm.setFieldsValue({ archive_type: '报废', reason: '' })
+              setArchiving(r)
+            }}>归档</Button>
+          )}
         </Space>
       ),
     },
@@ -114,7 +137,7 @@ export default function Elevators() {
   return (
     <Card>
       <div className="toolbar">
-        <Input.Search placeholder="编号 / 地址 / 品牌 / 物业" allowClear style={{ width: 260 }}
+        <Input.Search placeholder="编号 / 登记证号 / 地址 / 品牌 / 物业" allowClear style={{ width: 280 }}
           value={keyword} onChange={e => setKeyword(e.target.value)} onSearch={load} />
         <Select placeholder="运行状态" allowClear style={{ width: 130 }} value={status} onChange={setStatus}
           options={['正常', '保养中', '故障', '停用'].map(v => ({ value: v, label: v }))} />
@@ -122,8 +145,14 @@ export default function Elevators() {
           options={['正常', '即将到期', '已过期', '未建档'].map(v => ({ value: v, label: v }))} />
         <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         <div className="spacer" />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => openEdit(null)}>新增电梯</Button>
+        {isAdmin && <Button onClick={() => navigate('/archived')} icon={<InboxOutlined />}>归档库</Button>}
+        {isAdmin && <Button type="primary" icon={<PlusOutlined />} onClick={() => openEdit(null)}>新增电梯</Button>}
       </div>
+
+      {!isAdmin && (
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message="您当前为维保员角色，仅可查看档案与扫码作业；档案新增、编辑、归档请联系管理员。" />
+      )}
 
       <Table rowKey="id" loading={loading} dataSource={rows} columns={columns}
         scroll={{ x: 1100 }} pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 台` }} />
@@ -159,10 +188,35 @@ export default function Elevators() {
         </Form>
       </Modal>
 
-      <Modal title={`设备二维码 · ${qr}`} open={!!qr} footer={null} onCancel={() => setQr(null)}>
-        {qr && (
+      <Modal
+        title={`设备归档 · ${archiving?.code || ''}`}
+        open={!!archiving} onOk={submitArchive}
+        onCancel={() => setArchiving(null)}
+        okText="确认归档" cancelText="取消" okButtonProps={{ danger: true }}
+      >
+        <Alert type="warning" showIcon style={{ marginBottom: 16 }}
+          message="归档不是删除：设备历次保养、急修工单、年检记录将长期保留，可随时在归档库按编号查询或恢复。" />
+        <p style={{ color: '#666', marginBottom: 8 }}>
+          {archiving?.address} {archiving?.location_detail}
+        </p>
+        <Form form={archiveForm} layout="vertical">
+          <Form.Item name="archive_type" label="归档类型" rules={[{ required: true }]}>
+            <Select options={[
+              { value: '报废', label: '报废（设备达到寿命/无维修价值）' },
+              { value: '移交', label: '移交（设备移交其他单位管理）' },
+              { value: '退场', label: '退场（拆除/项目结束）' },
+            ]} />
+          </Form.Item>
+          <Form.Item name="reason" label="原因 / 说明" rules={[{ required: true, message: '请填写归档原因' }]}>
+            <Input.TextArea rows={3} placeholder="如：使用满15年，设备老化无维修价值" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal title={`设备二维码 · ${qrCode}`} open={!!qrCode} footer={null} onCancel={() => setQrCode(null)}>
+        {qrCode && (
           <div style={{ textAlign: 'center', padding: 12 }}>
-            <Image src={qrUrl(qr)} width={260} />
+            <Image src={qrUrl(qrCode)} width={260} />
             <div style={{ marginTop: 12, color: '#666' }}>
               <QrcodeOutlined /> 维保人员可在「扫码签到」页扫描此码
             </div>

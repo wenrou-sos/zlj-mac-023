@@ -3,6 +3,7 @@ import { Card, Col, Row, Statistic, List, Tag, Button, Alert } from 'antd'
 import {
   ApartmentOutlined, CheckCircleOutlined, ToolOutlined,
   SafetyCertificateOutlined, ClockCircleOutlined, AlertOutlined,
+  InboxOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -51,6 +52,9 @@ export default function Dashboard() {
         </Col>
         <Col xs={12} md={8} xl={4}>
           <Card className="stat-card"><Statistic title="本月保养次数" value={data.month_records} prefix={<ClockCircleOutlined />} /></Card>
+        </Col>
+        <Col xs={12} md={8} xl={4}>
+          <Card className="stat-card"><Statistic title="已归档设备" value={data.archived_total || 0} valueStyle={{ color: '#8c8c8c' }} prefix={<InboxOutlined />} /></Card>
         </Col>
       </Row>
 

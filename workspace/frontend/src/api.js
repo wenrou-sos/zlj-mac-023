@@ -2,9 +2,19 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: '/' })
 
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
 api.interceptors.response.use(
   (res) => res,
   (err) => {
+    if (err.response?.status === 401 && localStorage.getItem('token')) {
+      localStorage.removeItem('token')
+      if (!location.pathname.startsWith('/login')) location.href = '/login'
+    }
     const detail = err.response?.data?.detail
     if (typeof detail === 'string') {
       err.userMessage = detail
@@ -15,6 +25,7 @@ api.interceptors.response.use(
     } else {
       err.userMessage = err.message || '请求失败'
     }
+    err.httpStatus = err.response?.status
     return Promise.reject(err)
   }
 )
@@ -26,6 +37,10 @@ export const getElevatorByCode = (code) => api.get(`/api/elevators/code/${encode
 export const createElevator = (data) => api.post('/api/elevators', data).then(r => r.data)
 export const updateElevator = (id, data) => api.put(`/api/elevators/${id}`, data).then(r => r.data)
 export const deleteElevator = (id) => api.delete(`/api/elevators/${id}`).then(r => r.data)
+export const archiveElevator = (id, archive_type, reason) =>
+  api.post(`/api/elevators/${id}/archive`, { archive_type, reason }).then(r => r.data)
+export const restoreElevator = (id) =>
+  api.post(`/api/elevators/${id}/restore`).then(r => r.data)
 
 // 人员
 export const getWorkers = () => api.get('/api/workers').then(r => r.data)
@@ -44,7 +59,7 @@ export const completeRecord = (id, data) => api.put(`/api/maintenance/records/${
 export const getRecords = (params) => api.get('/api/maintenance/records', { params }).then(r => r.data)
 
 // 急修
-export const getRepairs = (status) => api.get('/api/repairs', { params: status ? { status } : {} }).then(r => r.data)
+export const getRepairs = (params) => api.get('/api/repairs', { params }).then(r => r.data)
 export const createRepair = (data) => api.post('/api/repairs', data).then(r => r.data)
 export const updateRepair = (id, data) => api.put(`/api/repairs/${id}`, data).then(r => r.data)
 
