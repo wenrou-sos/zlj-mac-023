@@ -1,0 +1,7 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.36
+pydantic==2.10.3
+qrcode[pil]==8.0
+# PostgreSQL 驱动（默认使用 SQLite，需要连接 PG 时安装即可）
+psycopg2-binary==2.9.10
