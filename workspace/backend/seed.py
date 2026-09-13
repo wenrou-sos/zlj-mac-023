@@ -1,10 +1,13 @@
-"""生成本地模拟数据：执行 `python seed.py` 即可（库已存在数据时会跳过）。"""
+"""生成本地模拟数据：幂等执行——旧库自动迁移并补齐登录账号，空库导入完整演示数据。"""
 import random
 from datetime import date, datetime, timedelta
+
+from sqlalchemy import select
 
 from database import Base, engine, SessionLocal
 import models
 from auth import hash_password
+from migrations import run_migrations
 
 random.seed(42)
 TODAY = date.today()
@@ -59,33 +62,53 @@ def dt(days, hour=10, minute=0):
     return datetime.combine(d(days), datetime.min.time()).replace(hour=hour, minute=minute)
 
 
+def ensure_users(db, workers):
+    """保证默认登录账号存在（旧库升级 / 重复执行 seed 时幂等）。"""
+    created = 0
+
+    def add_if_missing(username, password, name, role, worker_id=None):
+        nonlocal created
+        exists = db.scalar(select(models.User).where(models.User.username == username))
+        if not exists:
+            db.add(models.User(
+                username=username, password_hash=hash_password(password),
+                name=name, role=role, worker_id=worker_id, active=1,
+            ))
+            created += 1
+
+    add_if_missing("admin", "admin123", "系统管理员", "管理员")
+    for i, w in enumerate(workers):
+        add_if_missing(f"worker{i+1}", "123456", w.name, "维保员", w.id)
+    db.flush()
+    return created
+
+
 def run():
+    # 旧库先做增量迁移（补建 users 表、补归档列），不会清空任何数据
+    run_migrations()
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
+        existing_workers = db.scalars(select(models.Worker).order_by(models.Worker.id)).all()
+        created_users = ensure_users(db, existing_workers)
+
         if db.query(models.Elevator).count() > 0:
-            print("数据库已有数据，跳过模拟数据生成。")
+            db.commit()
+            print(f"数据库已有电梯数据，演示数据不重复导入；已确保登录账号可用"
+                  f"（新增 {created_users} 个账号）。")
+            if created_users:
+                print("默认账号：admin/admin123；worker1~worker6 / 123456")
             return
 
-        workers = []
-        for name, phone, cert, team, role in WORKERS:
-            w = models.Worker(name=name, phone=phone, cert_no=cert, team=team, role=role)
-            db.add(w)
-            workers.append(w)
-        db.flush()
-
-        # 登录账号：1 个管理员 + 每个维保人员 1 个账号（密码统一 123456）
-        db.add(models.User(
-            username="admin", password_hash=hash_password("admin123"),
-            name="系统管理员", role="管理员", active=1,
-        ))
-        for i, w in enumerate(workers):
-            db.add(models.User(
-                username=f"worker{i+1}",
-                password_hash=hash_password("123456"),
-                name=w.name, role="维保员", worker_id=w.id, active=1,
-            ))
-        db.flush()
+        workers = list(existing_workers)
+        if not workers:
+            for name, phone, cert, team, wrole in WORKERS:
+                w = models.Worker(name=name, phone=phone, cert_no=cert, team=team, role=wrole)
+                db.add(w)
+                workers.append(w)
+            db.flush()
+        # 全新库：账号与新建人员重新绑定
+        ensure_users(db, workers)
 
         # 12 台电梯，年检状态分布：正常 / 即将到期 / 已过期 / 故障
         inspect_offsets = [200, 350, 340, 330, 100, 360, 370, 250, 320, 80, 300, 150]

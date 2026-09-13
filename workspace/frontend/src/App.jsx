@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
-import { Layout, Menu, Badge, Tag, Spin, Dropdown, Button } from 'antd'
+import { Layout, Menu, Badge, Tag, Spin, Dropdown, Button, Result } from 'antd'
 import {
   DashboardOutlined, ApartmentOutlined, ScanOutlined, CalendarOutlined,
   ToolOutlined, SafetyCertificateOutlined, FileTextOutlined,
@@ -55,6 +55,12 @@ export default function App() {
 
   const selected = '/' + (location.pathname.split('/')[1] || 'dashboard')
 
+  // 管理员专属页面的路由守卫
+  const adminPage = isAdmin
+    ? <ArchivedElevators />
+    : <Result status="403" title="403" subTitle="归档库仅管理员可访问，请联系管理员执行归档或恢复操作"
+        extra={<Button type="primary" onClick={() => navigate('/dashboard')}>返回工作台</Button>} />
+
   const menuItems = MENU
     .filter((m) => !m.adminOnly || isAdmin)
     .map((m) => {
@@ -108,7 +114,7 @@ export default function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/elevators" element={<Elevators />} />
             <Route path="/elevators/:id" element={<ElevatorDetail />} />
-            <Route path="/archived" element={<ArchivedElevators />} />
+            <Route path="/archived" element={adminPage} />
             <Route path="/scan" element={<ScanCheckIn />} />
             <Route path="/plans" element={<Plans />} />
             <Route path="/records" element={<Records />} />

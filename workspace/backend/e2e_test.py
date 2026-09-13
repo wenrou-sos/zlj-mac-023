@@ -50,6 +50,11 @@ assert call("PUT", "/plans/1/toggle", {}, token=WT, expect=403) == 403
 assert call("POST", "/inspections", {"elevator_id": 1, "inspect_date": "2026-09-13",
             "next_date": "2027-09-13", "result": "合格"}, token=WT, expect=403) == 403
 print("1) 维保员不能改档案/归档/停计划/登记年检 OK")
+# 归档库与归档数据防绕过
+assert call("GET", "/elevators?archived=1", token=WT, expect=403) == 403
+assert call("GET", "/maintenance/records?include_archived=1", token=WT, expect=403) == 403
+assert call("GET", "/repairs?include_archived=1", token=WT, expect=403) == 403
+print("1b) 维保员无法通过参数绕过访问归档库 OK")
 
 # 维保员不能代签
 assert call("POST", "/maintenance/check-in",
@@ -94,6 +99,9 @@ assert any(e["id"] == ev5["id"] for e in archived)
 found = call("GET", f"/elevators?archived=1&keyword=DT-2024005", token=AT)
 assert len(found) == 1
 print("6) 归档设备从日常列表移除、按编号可查询 OK")
+assert call("GET", f"/elevators/{ev5['id']}", token=WT, expect=403) == 403
+assert call("GET", f"/elevators/{ev5['id']}/inspections", token=WT, expect=403) == 403
+print("6b) 维保员直接访问归档设备详情/历史被拒 OK")
 assert call("POST", "/maintenance/check-in",
             {"elevator_code": "DT-2024005", "worker_id": 1}, token=AT, expect=400) == 400
 print("7) 归档设备禁止日常维保操作 OK")

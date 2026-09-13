@@ -17,7 +17,10 @@ import schemas
 import auth
 from auth import get_current_user, require_admin, ROLE_ADMIN
 from services import inspect_info, serialize_elevator, WARN_DAYS
+from migrations import run_migrations
 
+# 旧库增量升级（补建 users 表、补归档列），再确保表结构完整
+run_migrations()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="电梯维保管理系统 API", version="1.1.0")
@@ -174,6 +177,9 @@ def list_elevators(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    # 归档库仅管理员可查询（直接调 API 也一样拦截）
+    if archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足：归档库仅管理员可访问")
     stmt = select(models.Elevator).where(models.Elevator.is_archived == archived).order_by(models.Elevator.code)
     if keyword:
         kw = f"%{keyword}%"
@@ -203,6 +209,8 @@ def get_elevator_by_code(
     ev = db.scalar(select(models.Elevator).where(models.Elevator.code == code))
     if not ev:
         raise HTTPException(404, f"未找到编号为 {code} 的电梯")
+    if ev.is_archived:
+        raise HTTPException(400, f"该设备已{ev.archive_type or '归档'}，如需恢复请联系管理员")
     return serialize_elevator(db, ev)
 
 
@@ -212,7 +220,10 @@ def get_elevator(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    return serialize_elevator(db, get_active_elevator(db, elevator_id))
+    ev = get_active_elevator(db, elevator_id)
+    if ev.is_archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足：归档设备详情仅管理员可查看")
+    return serialize_elevator(db, ev)
 
 
 @app.post("/api/elevators", response_model=schemas.ElevatorOut)
@@ -368,6 +379,8 @@ def list_plans(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    if include_archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足")
     today = date.today()
     stmt = select(models.MaintenancePlan).options(selectinload(models.MaintenancePlan.elevator))
     if scope == "active":
@@ -607,8 +620,13 @@ def list_records(
     )
     if elevator_id:
         stmt = stmt.where(models.MaintenanceRecord.elevator_id == elevator_id)
+        target = db.get(models.Elevator, elevator_id)
+        if target and target.is_archived and user.role != ROLE_ADMIN:
+            raise HTTPException(403, "权限不足：归档设备历史仅管理员可查看")
     elif not include_archived:
         stmt = stmt.join(models.Elevator).where(models.Elevator.is_archived == 0)
+    elif include_archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足")
     if ongoing is True:
         stmt = stmt.where(models.MaintenanceRecord.finish_time.is_(None))
     elif ongoing is False:
@@ -625,6 +643,8 @@ def list_repairs(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    if include_archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足")
     stmt = select(models.RepairOrder).options(
         selectinload(models.RepairOrder.elevator), selectinload(models.RepairOrder.worker)
     )
@@ -721,6 +741,8 @@ def list_inspections(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    if include_archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足")
     today = date.today()
     stmt = (
         select(models.Inspection)
@@ -791,6 +813,9 @@ def elevator_inspections(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    ev = db.get(models.Elevator, elevator_id)
+    if ev and ev.is_archived and user.role != ROLE_ADMIN:
+        raise HTTPException(403, "权限不足：归档设备历史仅管理员可查看")
     return db.scalars(
         select(models.Inspection)
         .where(models.Inspection.elevator_id == elevator_id)

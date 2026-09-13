@@ -59,6 +59,8 @@ python3 -m uvicorn main:app --reload
 
 - API 文档：http://127.0.0.1:8000/docs
 - 默认数据库：`backend/elevator.db`（SQLite）
+- **旧库升级**：在早期版本（无 users 表 / 无归档字段）的数据库上重跑 `seed.py`
+  或直接启动服务即可，`migrations.py` 会幂等补建缺失的表和列，原数据不丢，并自动补齐登录账号。
 
 ### 2. 前端（Vite，端口 5173）
 
