@@ -17,6 +17,7 @@ import schemas
 import auth
 from auth import get_current_user, require_admin, ROLE_ADMIN
 from services import inspect_info, serialize_elevator, WARN_DAYS
+from checklist_templates import get_checklist, CYCLES
 from migrations import run_migrations
 
 # 旧库增量升级（补建 users 表、补归档列），再确保表结构完整
@@ -431,6 +432,26 @@ def toggle_plan(
 
 
 # ---------------- 扫码签到 + 保养记录（管理员/维保员） ----------------
+@app.get("/api/elevators/{elevator_id}/checklist")
+def elevator_checklist(
+    elevator_id: int,
+    cycle: str = "半月",
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """按电梯类型与维保周期返回必检项目模板。"""
+    ev = get_active_elevator(db, elevator_id)
+    ensure_not_archived(ev)
+    if cycle not in CYCLES:
+        raise HTTPException(400, f"维保周期必须是 {'/'.join(CYCLES)}")
+    return {
+        "elevator_id": ev.id,
+        "elevator_type": ev.type,
+        "cycle": cycle,
+        "checklist": get_checklist(ev.type, cycle),
+    }
+
+
 @app.post("/api/maintenance/check-in", response_model=schemas.RecordOut)
 def check_in(
     payload: schemas.CheckInCreate,
@@ -485,15 +506,18 @@ def check_in(
 
     from services import next_plan
     plan = next_plan(db, ev.id)
+    cycle = plan.cycle if plan else "半月"
     rec = models.MaintenanceRecord(
         elevator_id=ev.id,
         worker_id=worker.id,
         plan_id=plan.id if plan else None,
-        kind=plan.cycle if plan else "半月",
+        kind=cycle,
         check_in_time=datetime.now(),
         check_in_lat=payload.lat,
         check_in_lng=payload.lng,
         finish_time=None,
+        # 签到时先按计划周期存一版模板快照，最终以完成时选择的周期重算
+        checklist=get_checklist(ev.type, cycle),
         items=[],
         result="进行中",
     )
@@ -555,10 +579,74 @@ def complete_record(
     ev = db.get(models.Elevator, rec.elevator_id)
     ensure_not_archived(ev)
 
-    rec.kind = payload.kind
-    rec.items = [it.model_dump() for it in payload.items]
-    rec.result = payload.result
-    rec.abnormal_desc = payload.abnormal_desc
+    # 完成时按“电梯类型 × 所选周期”生成权威模板快照（历史以完成时的模板为准，
+    # 之后模板调整不影响本记录）
+    cycle = payload.kind if payload.kind in CYCLES else rec.kind
+    template = get_checklist(ev.type, cycle)
+    required_names = [t["name"] for t in template]
+    required_set = set(required_names)
+
+    # 提交项：必检项按名称归集；自定义项必须明确 custom=True 且名称不能与必检项重名
+    submitted_required: dict[str, schemas.MaintenanceItem] = {}
+    custom_items: list[dict] = []
+    for it in payload.items:
+        if it.result not in ("正常", "异常"):
+            raise HTTPException(400, f"项目“{it.name}”结果值无效")
+        if it.custom or it.name not in required_set:
+            if it.name in required_set:
+                raise HTTPException(400, f"“{it.name}”是必检项，不能作为自定义项提交")
+            custom_items.append({
+                "name": it.name, "result": it.result, "note": it.note,
+                "required": False, "custom": True,
+            })
+        else:
+            if it.name in submitted_required:
+                raise HTTPException(400, f"项目“{it.name}”重复提交")
+            submitted_required[it.name] = it
+    # custom_items 字段与 items 中的自定义项等价，兼容两种提交方式
+    for ci in payload.custom_items:
+        if ci.name in required_set:
+            raise HTTPException(400, f"“{ci.name}”是必检项，不能作为自定义项提交")
+        if ci.name not in {c["name"] for c in custom_items}:
+            custom_items.append({
+                "name": ci.name, "result": ci.result, "note": ci.note,
+                "required": False, "custom": True,
+            })
+
+    # 必检项不允许跳过
+    missing = [n for n in required_names if n not in submitted_required]
+    if missing:
+        raise HTTPException(400, f"以下必检项未检查，不允许跳过：{'、'.join(missing[:5])}"
+                             + ("…" if len(missing) > 5 else ""))
+
+    # 按模板顺序组装完整清单；异常项必须有说明
+    final_items = []
+    abnormal_names = []
+    for name in required_names:
+        it = submitted_required[name]
+        if it.result == "异常":
+            abnormal_names.append(name)
+            if not (it.note or "").strip():
+                raise HTTPException(400, f"必检项“{name}”标记异常时必须填写异常说明")
+        final_items.append({
+            "name": name, "result": it.result, "note": it.note,
+            "required": True, "custom": False,
+        })
+    for ci in custom_items:
+        if ci["result"] == "异常":
+            abnormal_names.append(ci["name"])
+            if not ci["note"].strip():
+                raise HTTPException(400, f"自定义项“{ci['name']}”标记异常时必须填写说明")
+        final_items.append(ci)
+
+    rec.kind = cycle
+    rec.checklist = template
+    rec.items = final_items
+    rec.result = "异常" if abnormal_names else "正常"
+    if abnormal_names:
+        rec.abnormal_desc = payload.abnormal_desc or ("异常项：" + "、".join(abnormal_names))
+    else:
+        rec.abnormal_desc = ""
     rec.signature = payload.signature
     rec.finish_time = datetime.now()
 
@@ -572,22 +660,23 @@ def complete_record(
         )
         ev.status = "故障" if open_repair else "正常"
 
-    # 推进维保计划：下次日期顺延一个周期
+    # 推进维保计划：下次日期顺延一个周期（按计划周期，而非本次记录周期）
     if rec.plan_id:
         plan = db.get(models.MaintenancePlan, rec.plan_id)
         cycle_days = {"半月": 15, "季度": 90, "半年": 180, "年度": 365}.get(plan.cycle, 15)
         base = max(plan.next_date, date.today())
         plan.next_date = base + timedelta(days=cycle_days)
 
-    # 发现异常：自动生成待接单维修工单
-    if payload.result == "异常":
+    # 发现异常：自动生成待接单维修工单（以实际检查结果为准）
+    if abnormal_names:
+        desc = payload.abnormal_desc or ("保养异常项：" + "、".join(abnormal_names))
         order = models.RepairOrder(
             order_no=f"WX{datetime.now().strftime('%Y%m%d%H%M%S')}",
             elevator_id=ev.id,
             reporter=rec.worker.name if rec.worker else "维保员",
             reporter_phone=rec.worker.phone if rec.worker else None,
             report_time=datetime.now(),
-            fault_desc=payload.abnormal_desc or "保养中发现设备异常，需安排急修",
+            fault_desc=desc,
             fault_type="其他",
             level="一般",
             status="待接单",

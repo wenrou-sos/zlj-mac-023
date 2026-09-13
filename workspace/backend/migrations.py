@@ -19,6 +19,9 @@ ADDED_COLUMNS = {
         ("archive_reason", "TEXT"),
         ("archive_operator", "VARCHAR(50)"),
     ],
+    "maintenance_records": [
+        ("checklist", "JSON"),
+    ],
 }
 
 

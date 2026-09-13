@@ -8,6 +8,7 @@ from database import Base, engine, SessionLocal
 import models
 from auth import hash_password
 from migrations import run_migrations
+from checklist_templates import get_checklist
 
 random.seed(42)
 TODAY = date.today()
@@ -129,7 +130,7 @@ def run():
                 location_detail=f"{bldg}幢{unit}单元",
                 brand=brand,
                 model=model,
-                type="客梯" if i != 10 else "货梯",
+                type="货梯" if i == 10 else ("扶梯" if i == 11 else "客梯"),
                 floors=random.choice([11, 18, 24, 32]),
                 install_date=d(-(inspect_offsets[i] + 1500)),
                 use_date=d(-(inspect_offsets[i] + 1400)),
@@ -173,12 +174,15 @@ def run():
         )
         db.add(archived_plan)
         for back in [60, 75, 90]:
+            tpl = get_checklist(archived_ev.type, "半月")
             db.add(models.MaintenanceRecord(
                 elevator_id=archived_ev.id, worker_id=workers[4].id,
                 kind="半月", check_in_time=dt(-back, 9, 10),
                 check_in_lat=30.2501, check_in_lng=120.1203,
                 finish_time=dt(-back, 10, 30),
-                items=[{"name": it, "result": "正常", "note": ""} for it in MAINT_ITEMS[:6]],
+                checklist=tpl,
+                items=[{"name": it["name"], "result": "正常", "note": "",
+                        "required": True, "custom": False} for it in tpl],
                 result="正常", signature=workers[4].name,
             ))
         db.add(models.RepairOrder(
@@ -220,14 +224,25 @@ def run():
         # 历史保养记录（已完成）
         for i, ev in enumerate(elevators):
             w = workers[i % len(workers)]
+            tpl = get_checklist(ev.type, "半月")
             for back in [15, 30, 45]:
                 if i == 6 and back == 15:
                     continue  # 故障梯最近一次保养缺失
-                items = [
-                    {"name": it, "result": "正常" if random.random() > 0.08 else "异常",
-                     "note": "" if random.random() > 0.3 else "已现场调整并复检正常"}
-                    for it in random.sample(MAINT_ITEMS, 6)
-                ]
+                # 每次保养完成模板全部项目，个别项目异常并附说明
+                items = []
+                for t in tpl:
+                    abnormal = random.random() < 0.05
+                    items.append({
+                        "name": t["name"], "required": True, "custom": False,
+                        "result": "异常" if abnormal else "正常",
+                        "note": "磨损偏大，已现场调整并复检正常" if abnormal else "",
+                    })
+                # 偶尔有一条自定义补充项
+                if i % 4 == 0 and back == 30:
+                    items.append({
+                        "name": "物业临时加装门禁联动检查", "required": False, "custom": True,
+                        "result": "正常", "note": "",
+                    })
                 has_abn = any(x["result"] == "异常" for x in items)
                 rec = models.MaintenanceRecord(
                     elevator_id=ev.id,
@@ -237,6 +252,7 @@ def run():
                     check_in_lat=round(30.2 + random.uniform(-0.05, 0.05), 6),
                     check_in_lng=round(120.1 + random.uniform(-0.05, 0.05), 6),
                     finish_time=dt(-back, 10, random.randint(20, 55)),
+                    checklist=tpl,
                     items=items,
                     result="异常" if has_abn else "正常",
                     abnormal_desc="个别项目磨损，已现场处理" if has_abn else "",
@@ -255,6 +271,7 @@ def run():
             check_in_lat=30.24591,
             check_in_lng=120.10237,
             finish_time=None,
+            checklist=get_checklist(doing_ev.type, "半月"),
             items=[],
             result="进行中",
         )

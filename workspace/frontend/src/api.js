@@ -33,6 +33,8 @@ api.interceptors.response.use(
 // 电梯档案
 export const getElevators = (params) => api.get('/api/elevators', { params }).then(r => r.data)
 export const getElevator = (id) => api.get(`/api/elevators/${id}`).then(r => r.data)
+export const getChecklist = (id, cycle) =>
+  api.get(`/api/elevators/${id}/checklist`, { params: { cycle } }).then(r => r.data)
 export const getElevatorByCode = (code) => api.get(`/api/elevators/code/${encodeURIComponent(code)}`).then(r => r.data)
 export const createElevator = (data) => api.post('/api/elevators', data).then(r => r.data)
 export const updateElevator = (id, data) => api.put(`/api/elevators/${id}`, data).then(r => r.data)

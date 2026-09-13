@@ -62,15 +62,94 @@ assert call("POST", "/maintenance/check-in",
 print("2) 维保员不能代他人签到 OK")
 
 # ---- 维保员日常：本人签到、保养（异常自动开工单）、派单流转 ----
+# 客梯半月保模板
+tpl_half = call("GET", "/elevators/2/checklist?cycle=半月", token=WT)["checklist"]
+assert len(tpl_half) == 12 and all(t["required"] and not t["custom"] for t in tpl_half)
+print(f"2b) 客梯半月模板 {len(tpl_half)} 项 OK")
+
+# 同台电梯年度保项目更多（包含全部周期）
+tpl_year = call("GET", "/elevators/2/checklist?cycle=年度", token=WT)["checklist"]
+assert len(tpl_year) > len(tpl_half)
+print(f"2c) 客梯年度模板 {len(tpl_year)} 项（>半月 {len(tpl_half)}）OK")
+
+# 扶梯模板与客梯不同
+escalator = next(e for e in call("GET", "/elevators", token=WT) if e["type"] == "扶梯")
+if escalator:
+    tpl_esc = call("GET", f"/elevators/{escalator['id']}/checklist?cycle=半月", token=WT)["checklist"]
+    assert "扶手带运行速度与张紧度检查" in [t["name"] for t in tpl_esc]
+    assert "机房曳引机运行及油位检查" not in [t["name"] for t in tpl_esc]
+    print(f"2d) 扶梯半月模板 {len(tpl_esc)} 项（与客梯区分）OK")
+
+# 货梯模板含货梯专属项
+freight = next(e for e in call("GET", "/elevators", token=WT) if e["type"] == "货梯")
+tpl_goods = call("GET", f"/elevators/{freight['id']}/checklist?cycle=半月", token=WT)["checklist"]
+assert any("超载报警" in t["name"] for t in tpl_goods)
+print(f"2e) 货梯半月模板 {len(tpl_goods)} 项（含超载报警等货梯项）OK")
+
 rec = call("POST", "/maintenance/check-in", {"elevator_code": "DT-2024002", "worker_id": 1}, token=WT)
 assert rec["result"] == "进行中" and rec["elevator"]["status"] == "保养中"
+assert len(rec["checklist"]) == 12, "签到时应保存模板快照"
+
+# 必检项不允许跳过
+incomplete = [{"name": tpl_half[0]["name"], "result": "正常", "note": "",
+               "required": True, "custom": False}]
+assert call("PUT", f"/maintenance/records/{rec['id']}/complete", {
+    "kind": "半月", "items": incomplete, "result": "正常", "signature": "王建国",
+}, token=WT, expect=400) == 400
+print("2f) 跳过必检项被拒 OK")
+
+# 异常但不填说明被拒
+bad = [{"name": t["name"], "result": "异常", "note": "",
+        "required": True, "custom": False} for t in tpl_half]
+assert call("PUT", f"/maintenance/records/{rec['id']}/complete", {
+    "kind": "半月", "items": bad, "result": "异常", "signature": "王建国",
+}, token=WT, expect=400) == 400
+print("2g) 异常项无说明被拒 OK")
+
+# 自定义项冒充必检项被拒
+cheat = [{"name": t["name"], "result": "正常", "note": "",
+          "required": True, "custom": False} for t in tpl_half[:-1]]
+cheat.append({"name": tpl_half[-1]["name"], "result": "正常", "note": "",
+              "required": False, "custom": True})
+assert call("PUT", f"/maintenance/records/{rec['id']}/complete", {
+    "kind": "半月", "items": cheat, "result": "正常", "signature": "王建国",
+}, token=WT, expect=400) == 400
+print("2h) 必检项不能伪装成自定义项 OK")
+
+# 完整提交：必检全部正常 + 一个异常必检（附说明）+ 一个自定义项
+items = [{"name": t["name"], "result": "正常", "note": "",
+          "required": True, "custom": False} for t in tpl_half]
+items[3] = {"name": tpl_half[3]["name"], "result": "异常",
+            "note": "门锁触点烧蚀，需要更换", "required": True, "custom": False}
+items.append({"name": "物业加装门禁联动检查", "result": "正常", "note": "",
+              "required": False, "custom": True})
 rec = call("PUT", f"/maintenance/records/{rec['id']}/complete", {
-    "kind": "半月",
-    "items": [{"name": "制动器检查", "result": "异常", "note": "间隙偏大"}],
-    "result": "异常", "abnormal_desc": "制动器间隙偏大需调整", "signature": "王建国",
+    "kind": "半月", "items": items, "result": "异常",
+    "abnormal_desc": "制动器/门系统待修", "signature": "王建国",
 }, token=WT)
 assert rec["elevator"]["status"] == "故障"
-print("3) 维保员签到+异常保养 OK（自动开工单）")
+assert len(rec["items"]) == 13
+custom_saved = [i for i in rec["items"] if i.get("custom")]
+assert len(custom_saved) == 1 and custom_saved[0]["name"] == "物业加装门禁联动检查"
+assert rec["checklist"] and len(rec["checklist"]) == 12
+print("3) 完整保养提交 OK（必检 12 + 自定义 1，异常自动开工单，模板快照已留存）")
+
+# 周期切换：签到半月，提交时改年度，记录按年度模板存档
+rec2 = call("POST", "/maintenance/check-in", {"elevator_code": "DT-2024003", "worker_id": 1}, token=WT)
+assert rec2["kind"] == "半月" and len(rec2["checklist"]) == 12
+year_tpl = call("GET", "/elevators/3/checklist?cycle=年度", token=WT)["checklist"]
+items_y = [{"name": t["name"], "result": "正常", "note": "",
+            "required": True, "custom": False} for t in year_tpl]
+rec2 = call("PUT", f"/maintenance/records/{rec2['id']}/complete", {
+    "kind": "年度", "items": items_y, "result": "正常", "signature": "王建国",
+}, token=WT)
+assert rec2["kind"] == "年度" and len(rec2["items"]) == len(year_tpl) and len(rec2["checklist"]) == len(year_tpl)
+snapshot_len = len(rec2["items"])
+# 重新查询，历史记录内容不变
+rec2_again = [r for r in call("GET", f"/maintenance/records?elevator_id=3", token=WT)
+              if r["id"] == rec2["id"]][0]
+assert len(rec2_again["items"]) == snapshot_len and rec2_again["kind"] == "年度"
+print(f"3b) 周期切换存档 OK（年度 {snapshot_len} 项），历史快照不受模板调整影响")
 
 orders = [o for o in call("GET", "/repairs?status=待接单", token=WT)
           if o["elevator"]["code"] == "DT-2024002"]

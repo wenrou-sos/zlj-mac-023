@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Table, Tag, Button, Segmented, Drawer, Descriptions, Empty } from 'antd'
+import { Card, Table, Tag, Button, Segmented, Drawer, Descriptions, Empty, Space } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { getRecords } from '../api.js'
@@ -74,14 +74,31 @@ export default function Records() {
               <Descriptions.Item label="签名">{detail.signature || '—'}</Descriptions.Item>
             </Descriptions>
 
-            <h4 style={{ margin: '20px 0 10px' }}>保养项目清单</h4>
+            <h4 style={{ margin: '20px 0 10px' }}>
+              保养项目清单
+              {detail.kind && <Tag color="blue" style={{ marginLeft: 8 }}>{detail.kind}保模板</Tag>}
+              <span style={{ fontSize: 12, color: '#999', fontWeight: 'normal' }}>
+                必检 {(detail.items || []).filter(i => !i.custom).length} 项 ·
+                补充 {(detail.items || []).filter(i => i.custom).length} 项
+              </span>
+            </h4>
             {detail.items?.length ? (
               <Table rowKey="name" size="small" pagination={false} dataSource={detail.items}
                 columns={[
-                  { title: '检查项目', dataIndex: 'name' },
+                  {
+                    title: '检查项目', dataIndex: 'name',
+                    render: (v, r) => (
+                      <Space size={4}>
+                        {v}
+                        {r.custom
+                          ? <Tag color="purple" style={{ marginInlineStart: 4 }}>补充</Tag>
+                          : <Tag color="blue" style={{ marginInlineStart: 4 }}>必检</Tag>}
+                      </Space>
+                    ),
+                  },
                   { title: '结果', dataIndex: 'result', width: 80,
                     render: v => <Tag color={v === '正常' ? 'green' : 'red'}>{v}</Tag> },
-                  { title: '备注', dataIndex: 'note', render: v => v || '—' },
+                  { title: '说明', dataIndex: 'note', render: v => v || '—' },
                 ]} />
             ) : <Empty description="尚未填写保养项目（进行中）" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
           </>

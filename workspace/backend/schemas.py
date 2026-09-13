@@ -170,11 +170,20 @@ class MaintenanceItem(BaseModel):
     name: str
     result: str = "正常"   # 正常/异常
     note: str = ""
+    required: bool = True
+    custom: bool = False
+
+
+class CustomItem(BaseModel):
+    name: str
+    result: str = "正常"
+    note: str = ""
 
 
 class RecordComplete(BaseModel):
     kind: Optional[str] = "半月"
     items: list[MaintenanceItem] = []
+    custom_items: list[CustomItem] = []
     result: str = "正常"
     abnormal_desc: Optional[str] = ""
     signature: Optional[str] = ""
@@ -191,6 +200,7 @@ class RecordOut(ORMModel):
     check_in_lng: Optional[float]
     check_in_addr: Optional[str]
     finish_time: Optional[datetime]
+    checklist: Optional[Any]
     items: Optional[Any]
     result: Optional[str]
     abnormal_desc: Optional[str]

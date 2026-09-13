@@ -108,7 +108,8 @@ class MaintenanceRecord(Base):
     check_in_lng = Column(Float)
     check_in_addr = Column(String(200), default="现场扫码签到")
     finish_time = Column(DateTime)                       # 完成时间
-    items = Column(JSON, default=list)                   # 保养项目清单 [{name, result, note}]
+    checklist = Column(JSON, default=list)              # 签到时的项目模板快照（必检/自定义）
+    items = Column(JSON, default=list)                   # 实际检查结果 [{name, result, note, required, custom}]
     result = Column(String(20), default="正常")          # 正常/异常
     abnormal_desc = Column(Text, default="")
     signature = Column(String(50), default="")           # 维保人员签名（文字）
