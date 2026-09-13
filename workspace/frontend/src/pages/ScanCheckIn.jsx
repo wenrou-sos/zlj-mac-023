@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Card, Steps, Button, Select, Space, Typography, message, Form, Input, Radio,
-  Checkbox, Tag, Descriptions, Divider, Alert,
+  Checkbox, Tag, Descriptions, Divider, Alert, Modal,
 } from 'antd'
 import {
   ScanOutlined, EnvironmentOutlined, CheckCircleOutlined, SafetyOutlined,
@@ -69,28 +69,54 @@ export default function ScanCheckIn() {
     scanTimer.current = setTimeout(() => doCheckIn(code), 600)
   }
 
+  const enterMaint = (rec, msg) => {
+    setRecord(rec)
+    setElevator(rec.elevator)
+    setScanning(false)
+    setStep(rec.finish_time ? 3 : 1)
+    if (!rec.finish_time) {
+      form.setFieldsValue({
+        kind: rec.kind || '半月',
+        abnormal_desc: '',
+        signature: workers.find(w => w.id === workerId)?.name || '',
+      })
+      message.success(msg || '扫码签到成功！')
+    } else {
+      message.info('该电梯存在已完成签到记录')
+    }
+  }
+
   const doCheckIn = async (code) => {
     try {
       // 模拟定位坐标
       const lat = +(30.2 + Math.random() * 0.06).toFixed(6)
       const lng = +(120.1 + Math.random() * 0.06).toFixed(6)
       const rec = await checkIn({ elevator_code: code, worker_id: workerId, lat, lng })
-      setRecord(rec)
-      setElevator(rec.elevator)
-      setScanning(false)
-      setStep(rec.finish_time ? 3 : 1)
-      if (!rec.finish_time) {
-        form.setFieldsValue({
-          kind: rec.kind || '半月',
-          abnormal_desc: '',
-          signature: workers.find(w => w.id === workerId)?.name || '',
-        })
-        message.success('扫码签到成功！')
-      } else {
-        message.info('该电梯存在已完成签到记录')
-      }
+      enterMaint(rec)
     } catch (e) {
       setScanning(false)
+      // 409：已有他人未完成的保养记录，确认后接手
+      if (e.conflict) {
+        const c = e.conflict
+        Modal.confirm({
+          title: '该电梯已有未完成的保养',
+          content: (
+            <div>
+              <p style={{ marginBottom: 8 }}>{c.message}</p>
+              <p style={{ color: '#999', marginBottom: 0 }}>
+                原签到人：<b>{c.owner_name}</b>，签到时间：{fmtDateTime(c.check_in_time)}
+              </p>
+            </div>
+          ),
+          okText: `由${workers.find(w => w.id === workerId)?.name || '当前人员'}接手`,
+          cancelText: '取消',
+          onOk: async () => {
+            const rec = await takeOverRecord(c.record_id, workerId)
+            enterMaint(rec, '已接手，保养记录已转到当前维保人员名下')
+          },
+        })
+        return
+      }
       message.error(e.userMessage)
     }
   }
@@ -254,6 +280,7 @@ export default function ScanCheckIn() {
               <Title level={4} style={{ marginTop: 12 }}>保养记录已提交</Title>
               <Descriptions bordered column={1} style={{ maxWidth: 520, margin: '20px auto', textAlign: 'left' }} size="small">
                 <Descriptions.Item label="设备">{elevator.code}</Descriptions.Item>
+                <Descriptions.Item label="维保人">{record.worker?.name || worker?.name}</Descriptions.Item>
                 <Descriptions.Item label="签到时间">{fmtDateTime(record.check_in_time)}</Descriptions.Item>
                 <Descriptions.Item label="完成时间">{fmtDateTime(record.finish_time)}</Descriptions.Item>
                 <Descriptions.Item label="保养结论">

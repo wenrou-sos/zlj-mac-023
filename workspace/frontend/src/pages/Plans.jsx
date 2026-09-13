@@ -24,16 +24,20 @@ export default function Plans() {
 
   const submit = async () => {
     const v = await form.validateFields()
-    await createPlan({
-      elevator_id: v.elevator_id,
-      cycle: v.cycle,
-      next_date: v.next_date.format('YYYY-MM-DD'),
-      end_date: v.end_date ? v.end_date.format('YYYY-MM-DD') : null,
-      assignee_id: v.assignee_id,
-      remark: v.remark,
-    })
-    message.success('计划已创建')
-    setOpen(false); form.resetFields(); load()
+    try {
+      await createPlan({
+        elevator_id: v.elevator_id,
+        cycle: v.cycle,
+        next_date: v.next_date.format('YYYY-MM-DD'),
+        end_date: v.end_date ? v.end_date.format('YYYY-MM-DD') : null,
+        assignee_id: v.assignee_id,
+        remark: v.remark,
+      })
+      message.success('计划已创建')
+      setOpen(false); form.resetFields(); load()
+    } catch (e) {
+      message.error(e.userMessage || '保存失败')
+    }
   }
 
   const columns = [

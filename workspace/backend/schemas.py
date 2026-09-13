@@ -35,6 +35,7 @@ class ElevatorCreate(ElevatorBase):
 
 
 class ElevatorUpdate(BaseModel):
+    code: Optional[str] = None
     reg_code: Optional[str] = None
     address: Optional[str] = None
     location_detail: Optional[str] = None
@@ -130,6 +131,10 @@ class CheckInCreate(BaseModel):
     worker_id: int
     lat: Optional[float] = None
     lng: Optional[float] = None
+
+
+class TakeOverCreate(BaseModel):
+    worker_id: int
 
 
 class MaintenanceItem(BaseModel):

@@ -5,8 +5,16 @@ const api = axios.create({ baseURL: '/' })
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    const msg = err.response?.data?.detail || err.message || '请求失败'
-    err.userMessage = typeof msg === 'string' ? msg : '请求失败'
+    const detail = err.response?.data?.detail
+    if (typeof detail === 'string') {
+      err.userMessage = detail
+    } else if (detail && typeof detail === 'object' && detail.message) {
+      // 409 冲突等结构化错误
+      err.userMessage = detail.message
+      err.conflict = detail
+    } else {
+      err.userMessage = err.message || '请求失败'
+    }
     return Promise.reject(err)
   }
 )
@@ -30,6 +38,8 @@ export const togglePlan = (id) => api.put(`/api/plans/${id}/toggle`).then(r => r
 
 // 扫码签到 / 保养
 export const checkIn = (data) => api.post('/api/maintenance/check-in', data).then(r => r.data)
+export const takeOverRecord = (id, workerId) =>
+  api.post(`/api/maintenance/records/${id}/take-over`, { worker_id: workerId }).then(r => r.data)
 export const completeRecord = (id, data) => api.put(`/api/maintenance/records/${id}/complete`, data).then(r => r.data)
 export const getRecords = (params) => api.get('/api/maintenance/records', { params }).then(r => r.data)
 

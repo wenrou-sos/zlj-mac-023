@@ -47,15 +47,20 @@ export default function Elevators() {
       use_date: v.use_date ? v.use_date.format('YYYY-MM-DD') : null,
       last_inspect_date: v.last_inspect_date ? v.last_inspect_date.format('YYYY-MM-DD') : null,
     }
-    if (modal.record) {
-      await updateElevator(modal.record.id, payload)
-      message.success('档案已更新')
-    } else {
-      await createElevator(payload)
-      message.success('档案已创建')
+    try {
+      if (modal.record) {
+        await updateElevator(modal.record.id, payload)
+        message.success('档案已更新')
+      } else {
+        await createElevator(payload)
+        message.success('档案已创建')
+      }
+      setModal({ open: false, record: null })
+      load()
+    } catch (e) {
+      // 编号/登记证号重复等：保留弹窗并展示具体原因
+      message.error(e.userMessage || '保存失败')
     }
-    setModal({ open: false, record: null })
-    load()
   }
 
   const columns = [
@@ -128,7 +133,11 @@ export default function Elevators() {
         okText="保存" cancelText="取消">
         <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
           <Row gutter={16}>
-            <Col span={8}><Form.Item name="code" label="设备编号（扫码码值）" rules={[{ required: true }]}><Input placeholder="如 DT-2024001" /></Form.Item></Col>
+            <Col span={8}><Form.Item name="code" label="设备编号（扫码码值）" rules={[{ required: true }]}
+              tooltip="修改后设备二维码码值同步变化，现场旧码将无法扫码"
+              extra={modal.record ? <span style={{ color: '#fa8c16' }}>修改编号后需重新张贴二维码</span> : null}>
+              <Input placeholder="如 DT-2024001" />
+            </Form.Item></Col>
             <Col span={8}><Form.Item name="reg_code" label="使用登记证编号"><Input /></Form.Item></Col>
             <Col span={8}><Form.Item name="status" label="运行状态"><Select options={['正常', '保养中', '故障', '停用'].map(v => ({ value: v, label: v }))} /></Form.Item></Col>
             <Col span={12}><Form.Item name="address" label="安装地址" rules={[{ required: true }]}><Input /></Form.Item></Col>

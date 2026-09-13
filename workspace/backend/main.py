@@ -2,10 +2,12 @@
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy import select, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 import qrcode
@@ -25,6 +27,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(request: Request, exc: IntegrityError):
+    """数据库唯一约束等冲突统一返回 400，保证前端能拿到可读提示。"""
+    return JSONResponse(status_code=400, content={"detail": "数据冲突：编号或登记证号可能已存在"})
 
 
 # ---------------- 静态二维码 ----------------
@@ -157,7 +165,11 @@ def get_elevator(elevator_id: int, db: Session = Depends(get_db)):
 @app.post("/api/elevators", response_model=schemas.ElevatorOut)
 def create_elevator(payload: schemas.ElevatorCreate, db: Session = Depends(get_db)):
     if db.scalar(select(models.Elevator).where(models.Elevator.code == payload.code)):
-        raise HTTPException(400, "设备编号已存在")
+        raise HTTPException(400, f"设备编号 {payload.code} 已存在")
+    if payload.reg_code and db.scalar(
+        select(models.Elevator).where(models.Elevator.reg_code == payload.reg_code)
+    ):
+        raise HTTPException(400, f"使用登记证编号 {payload.reg_code} 已存在")
     ev = models.Elevator(**payload.model_dump())
     db.add(ev)
     db.commit()
@@ -170,7 +182,23 @@ def update_elevator(elevator_id: int, payload: schemas.ElevatorUpdate, db: Sessi
     ev = db.get(models.Elevator, elevator_id)
     if not ev:
         raise HTTPException(404, "电梯不存在")
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    # 唯一性校验（排除自身）
+    if data.get("code") and db.scalar(
+        select(models.Elevator.id).where(
+            models.Elevator.code == data["code"],
+            models.Elevator.id != elevator_id,
+        )
+    ):
+        raise HTTPException(400, f"设备编号 {data['code']} 已存在")
+    if data.get("reg_code") and db.scalar(
+        select(models.Elevator.id).where(
+            models.Elevator.reg_code == data["reg_code"],
+            models.Elevator.id != elevator_id,
+        )
+    ):
+        raise HTTPException(400, f"使用登记证编号 {data['reg_code']} 已存在")
+    for k, v in data.items():
         setattr(ev, k, v)
     db.commit()
     db.refresh(ev)
@@ -251,7 +279,7 @@ def check_in(payload: schemas.CheckInCreate, db: Session = Depends(get_db)):
     if not worker:
         raise HTTPException(404, "维保人员不存在")
 
-    # 同一台电梯存在未完成记录则直接返回（避免重复签到）
+    # 同一台电梯存在未完成记录：同人直接返回；换人则返回 409 冲突，由前端确认是否接手
     existing = db.scalar(
         select(models.MaintenanceRecord)
         .where(
@@ -262,7 +290,19 @@ def check_in(payload: schemas.CheckInCreate, db: Session = Depends(get_db)):
     )
     if existing:
         existing.elevator = ev
-        existing.worker = worker
+        existing.worker = db.get(models.Worker, existing.worker_id)
+        if existing.worker_id != worker.id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"该电梯有一条未完成的保养记录（{existing.worker.name} 签到），"
+                               f"记录仍归属原维保人员。如需由 {worker.name} 继续完成，请确认接手。",
+                    "record_id": existing.id,
+                    "owner_name": existing.worker.name,
+                    "owner_id": existing.worker_id,
+                    "check_in_time": existing.check_in_time.isoformat(),
+                },
+            )
         return existing
 
     from services import next_plan
@@ -289,6 +329,30 @@ def check_in(payload: schemas.CheckInCreate, db: Session = Depends(get_db)):
     return rec
 
 
+@app.post("/api/maintenance/records/{record_id}/take-over", response_model=schemas.RecordOut)
+def take_over_record(record_id: int, payload: schemas.TakeOverCreate, db: Session = Depends(get_db)):
+    """换人接手未完成的保养记录：记录改挂到新维保人员名下，并追加一条接手备注。"""
+    rec = db.get(models.MaintenanceRecord, record_id)
+    if not rec:
+        raise HTTPException(404, "保养记录不存在")
+    if rec.finish_time:
+        raise HTTPException(400, "该记录已完成，无需接手")
+    new_worker = db.get(models.Worker, payload.worker_id)
+    if not new_worker:
+        raise HTTPException(404, "维保人员不存在")
+
+    old_worker = db.get(models.Worker, rec.worker_id)
+    if rec.worker_id != new_worker.id:
+        rec.worker_id = new_worker.id
+        note = f"【{datetime.now():%Y-%m-%d %H:%M}】{new_worker.name} 接手（原签到人：{old_worker.name if old_worker else '—'}）"
+        rec.check_in_addr = f"{rec.check_in_addr or '现场扫码签到'}\n{note}"
+    db.commit()
+    db.refresh(rec)
+    rec.elevator = db.get(models.Elevator, rec.elevator_id)
+    rec.worker = new_worker
+    return rec
+
+
 @app.put("/api/maintenance/records/{record_id}/complete", response_model=schemas.RecordOut)
 def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session = Depends(get_db)):
     rec = db.get(models.MaintenanceRecord, record_id)
@@ -305,14 +369,15 @@ def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session
     rec.finish_time = datetime.now()
 
     ev = db.get(models.Elevator, rec.elevator_id)
-    # 完成保养：电梯恢复正常（除非存在未完成急修）
-    open_repair = db.scalar(
-        select(models.RepairOrder).where(
-            models.RepairOrder.elevator_id == ev.id,
-            models.RepairOrder.status.in_(["待接单", "已派单", "维修中"]),
+    # 仅对“保养中”的电梯做状态联动；“停用”是人工设置状态，保养流程不得覆盖
+    if ev.status == "保养中":
+        open_repair = db.scalar(
+            select(models.RepairOrder).where(
+                models.RepairOrder.elevator_id == ev.id,
+                models.RepairOrder.status.in_(["待接单", "已派单", "维修中"]),
+            )
         )
-    )
-    ev.status = "故障" if open_repair else "正常"
+        ev.status = "故障" if open_repair else "正常"
 
     # 推进维保计划：下次日期顺延一个周期
     if rec.plan_id:
@@ -335,7 +400,8 @@ def complete_record(record_id: int, payload: schemas.RecordComplete, db: Session
             status="待接单",
         )
         db.add(order)
-        ev.status = "故障"
+        if ev.status != "停用":
+            ev.status = "故障"
 
     db.commit()
     db.refresh(rec)
@@ -408,7 +474,8 @@ def create_repair(payload: schemas.RepairCreate, db: Session = Depends(get_db)):
         status="待接单",
     )
     ev = db.get(models.Elevator, elevator_id)
-    ev.status = "故障"
+    if ev.status != "停用":
+        ev.status = "故障"
     db.add(order)
     db.commit()
     db.refresh(order)
@@ -434,12 +501,11 @@ def update_repair(order_id: int, payload: schemas.RepairUpdate, db: Session = De
     for k, v in data.items():
         setattr(order, k, v)
 
-    if new_status == "已完成":
+    if new_status in ("已完成", "已派单", "维修中"):
         ev = db.get(models.Elevator, order.elevator_id)
-        ev.status = "正常"
-    elif new_status in ("已派单", "维修中"):
-        ev = db.get(models.Elevator, order.elevator_id)
-        ev.status = "故障"
+        # 停用梯不自动恢复运行；完成急修后回到“停用”，需人工确认再启用
+        if ev.status != "停用":
+            ev.status = "正常" if new_status == "已完成" else "故障"
 
     db.commit()
     db.refresh(order)

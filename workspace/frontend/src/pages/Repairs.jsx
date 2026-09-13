@@ -30,16 +30,20 @@ export default function Repairs() {
 
   const submitCreate = async () => {
     const v = await form.validateFields()
-    await createRepair({
-      elevator_id: v.elevator_id,
-      reporter: v.reporter,
-      reporter_phone: v.reporter_phone,
-      fault_desc: v.fault_desc,
-      fault_type: v.fault_type,
-      level: v.level,
-    })
-    message.success('报修工单已创建')
-    setCreateOpen(false); form.resetFields(); load()
+    try {
+      await createRepair({
+        elevator_id: v.elevator_id,
+        reporter: v.reporter,
+        reporter_phone: v.reporter_phone,
+        fault_desc: v.fault_desc,
+        fault_type: v.fault_type,
+        level: v.level,
+      })
+      message.success('报修工单已创建')
+      setCreateOpen(false); form.resetFields(); load()
+    } catch (e) {
+      message.error(e.userMessage || '保存失败')
+    }
   }
 
   const openProcess = (o) => {
@@ -54,20 +58,23 @@ export default function Repairs() {
 
   // 状态流转：待接单 -> 已派单 -> 维修中 -> 已完成
   const advance = async (nextStatus) => {
-    const v = await procForm.validateFields()
-    const payload = {
-      status: nextStatus,
-      worker_id: v.worker_id,
-      solution: v.solution,
-      parts: v.parts_text ? v.parts_text.split(/[、,\s]+/).filter(Boolean) : [],
-      cost: v.cost || 0,
+    try {
+      const v = await procForm.validateFields()
+      const payload = {
+        status: nextStatus,
+        worker_id: v.worker_id,
+        solution: v.solution,
+        parts: v.parts_text ? v.parts_text.split(/[、,\s]+/).filter(Boolean) : [],
+        cost: v.cost || 0,
+      }
+      await updateRepair(current.id, payload)
+      message.success(`工单已更新为「${nextStatus}」`)
+      const updated = await getRepairs()
+      setRows(filter === 'all' ? updated : updated.filter(r => r.status === filter))
+      setCurrent(updated.find(r => r.id === current.id))
+    } catch (e) {
+      if (e?.response) message.error(e.userMessage || '操作失败')
     }
-    await updateRepair(current.id, payload)
-    message.success(`工单已更新为「${nextStatus}」`)
-    const updated = await getRepairs()
-    setRows(filter === 'all' ? updated : updated.filter(r => r.status === filter))
-    const fresh = updated.find(r => r.id === current.id)
-    setCurrent(fresh)
   }
 
   const columns = [

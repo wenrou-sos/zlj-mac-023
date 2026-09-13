@@ -2,6 +2,7 @@
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 
 BASE = "http://127.0.0.1:8000/api"
 
@@ -80,5 +81,56 @@ print("6) 年检登记 OK -> 状态:", ev7["inspect_status"], "剩余:", ev7["in
 d = call("GET", "/dashboard")
 print("7) 仪表盘 OK -> 电梯:", d["elevator_total"], "未完成急修:", d["repair_open"],
       "年检预警:", d["inspect_soon"], "过期:", d["inspect_overdue"], "逾期计划:", d["plan_overdue"])
+
+# 8. Bug1 回归：换人扫同一台电梯应返回 409，记录仍归属原签到人
+rec1 = call("POST", "/maintenance/check-in", {
+    "elevator_code": "DT-2024003", "worker_id": 1,
+})
+print("8) 首次签到 OK -> 记录", rec1["id"], "归属:", rec1["worker"]["name"])
+try:
+    call("POST", "/maintenance/check-in", {"elevator_code": "DT-2024003", "worker_id": 2})
+    raise AssertionError("换人扫码应返回 409")
+except urllib.error.HTTPError as e:
+    assert e.code == 409
+    info = json.loads(e.read())["detail"]
+    print("   换人扫码 409 OK ->", info["message"][:30], "…")
+# 接手后记录改挂新人名下
+rec_t = call("POST", f"/maintenance/records/{rec1['id']}/take-over", {"worker_id": 2})
+assert rec_t["worker"]["id"] == 2 and "接手" in rec_t["check_in_addr"]
+print("   接手 OK -> 现归属:", rec_t["worker"]["name"])
+call("PUT", f"/maintenance/records/{rec1['id']}/complete", {
+    "kind": "半月", "items": [{"name": "x", "result": "正常", "note": ""}],
+    "result": "正常", "signature": "李志强",
+})
+
+# 9. Bug2 回归：停用电梯保养完成后仍为“停用”
+ev12 = call("GET", "/elevators/code/DT-2024012")
+assert ev12["status"] == "停用"
+rec_s = call("POST", "/maintenance/check-in", {"elevator_code": "DT-2024012", "worker_id": 1})
+call("PUT", f"/maintenance/records/{rec_s['id']}/complete", {
+    "kind": "半月", "items": [{"name": "x", "result": "正常", "note": ""}],
+    "result": "正常", "signature": "王建国",
+})
+ev12 = call("GET", "/elevators/code/DT-2024012")
+assert ev12["status"] == "停用", ev12["status"]
+print("9) 停用梯保养后保持停用 OK")
+
+# 10. Bug3 回归：编辑设备编号能真正更新
+ev1 = call("GET", "/elevators/code/DT-2024001")
+call("PUT", f"/elevators/{ev1['id']}", {"code": "DT-RENAMED-01"})
+assert call("GET", "/elevators/code/DT-RENAMED-01")["id"] == ev1["id"]
+call("PUT", f"/elevators/{ev1['id']}", {"code": "DT-2024001"})  # 改回
+print("10) 设备编号可修改 OK")
+
+# 11. Bug4 回归：登记证号重复返回 400 且有可读信息
+existing_reg = call("GET", "/elevators/code/DT-2024002")["reg_code"]
+try:
+    call("PUT", f"/elevators/{ev1['id']}", {"reg_code": existing_reg})
+    raise AssertionError("重复登记证号应返回 400")
+except urllib.error.HTTPError as e:
+    assert e.code == 400
+    msg = json.loads(e.read())["detail"]
+    assert "登记证" in msg
+    print("11) 登记证号重复 -> 400 OK:", msg)
 
 print("\n全部端到端测试通过 ✔")

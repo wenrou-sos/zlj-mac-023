@@ -29,17 +29,21 @@ export default function InspectionRemind() {
 
   const submit = async () => {
     const v = await form.validateFields()
-    await createInspection({
-      elevator_id: v.elevator_id,
-      inspect_date: v.inspect_date.format('YYYY-MM-DD'),
-      next_date: v.next_date.format('YYYY-MM-DD'),
-      org: v.org,
-      result: v.result,
-      certificate_no: v.certificate_no,
-      remark: v.remark,
-    })
-    message.success('年检记录已登记，档案年检日期已同步更新')
-    setOpen(false); form.resetFields(); load()
+    try {
+      await createInspection({
+        elevator_id: v.elevator_id,
+        inspect_date: v.inspect_date.format('YYYY-MM-DD'),
+        next_date: v.next_date.format('YYYY-MM-DD'),
+        org: v.org,
+        result: v.result,
+        certificate_no: v.certificate_no,
+        remark: v.remark,
+      })
+      message.success('年检记录已登记，档案年检日期已同步更新')
+      setOpen(false); form.resetFields(); load()
+    } catch (e) {
+      message.error(e.userMessage || '保存失败')
+    }
   }
 
   const overdueCount = expiring.filter(e => e.inspect_status === '已过期').length
